@@ -197,8 +197,10 @@ function showEditor(doc) {
       <div class="signer-row" data-id="${s.id}">
         <span class="dot" style="background:${COLORS[i % COLORS.length]}"></span>
         <div>
-          <input data-k="name" placeholder="Full name" value="${esc(s.name)}">
-          <input data-k="email" type="email" placeholder="email@example.com" value="${esc(s.email)}">
+          <span class="small muted">Full name</span>
+          <input data-k="name" placeholder="e.g. Jane Doe" value="${esc(s.name)}">
+          <span class="small muted">Email</span>
+          <input data-k="email" type="email" placeholder="jane@company.com" value="${esc(s.email)}">
         </div>
         <button class="ghost danger" data-rm title="Remove signer">✕</button>
       </div>`).join('') || '<p class="small muted">No signers yet.</p>';
@@ -209,6 +211,18 @@ function showEditor(doc) {
         renderSignerSelect();
         scheduleSave();
       }));
+      // An email typed into the name box most likely belongs in the email box.
+      row.querySelector('input[data-k="name"]').onblur = () => {
+        if (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s.name.trim()) && !s.email.trim()) {
+          s.email = s.name.trim();
+          s.name = '';
+          renderSigners();
+          renderSignerSelect();
+          scheduleSave();
+          toast('Moved the email to the Email box. Please enter the full name.');
+          $(`.signer-row[data-id="${s.id}"] input[data-k="name"]`).focus();
+        }
+      };
       row.querySelector('[data-rm]').onclick = () => {
         doc.signers = doc.signers.filter((x) => x.id !== s.id);
         doc.fields = doc.fields.filter((f) => f.signerId !== s.id);

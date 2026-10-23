@@ -50,6 +50,7 @@ tr.click { cursor: pointer; } tr.click:hover td { background: #f9fafb; }
 .sidebar section { padding-bottom: 16px; margin-bottom: 16px; border-bottom: 1px solid var(--line); }
 .signer-row { display: grid; grid-template-columns: 12px 1fr auto; gap: 8px; align-items: start; padding: 8px; border: 1px solid var(--line); border-radius: 8px; margin-bottom: 8px; }
 .signer-row input { padding: 5px 8px; margin-bottom: 4px; }
+.signer-row span.small { display: block; }
 .dot { width: 12px; height: 12px; border-radius: 50%; margin-top: 9px; }
 .palette { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
 .palette button { justify-content: flex-start; font-weight: 500; }

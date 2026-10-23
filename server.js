@@ -181,7 +181,9 @@ app.post('/api/documents/:id/send', requireAdmin, async (req, res) => {
   if (doc.status !== 'draft') return res.status(400).json({ error: 'Already sent' });
   if (!doc.signers.length) return res.status(400).json({ error: 'Add at least one signer' });
   for (const s of doc.signers) {
-    if (!s.name || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s.email)) return res.status(400).json({ error: `Signer ${s.order} needs a name and valid email` });
+    const who = `Signer ${s.order}${s.name ? ` (${s.name})` : ''}`;
+    if (!s.name) return res.status(400).json({ error: `${who}: please enter their full name.` });
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s.email)) return res.status(400).json({ error: `${who}: please enter a valid email address.` });
     if (!doc.fields.some((f) => f.signerId === s.id && f.type === 'signature')) return res.status(400).json({ error: `${s.name} has no signature field` });
   }
   doc.signers.forEach((s) => (s.token = id(24)));
