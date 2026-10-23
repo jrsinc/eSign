@@ -46,6 +46,19 @@
     </div>
   </div>
 
+  <div id="reasonModal" class="modal-bg hidden">
+    <div class="modal">
+      <h2>Reason for signing</h2>
+      <p class="small muted">Select why you are signing this document. It is recorded in the audit report.</p>
+      <div class="reasons" id="reasonList"></div>
+      <input id="reasonOther" class="hidden" placeholder="Type your reason" maxlength="300">
+      <div class="row end" style="margin-top:16px">
+        <button id="reasonCancel">Cancel</button>
+        <button id="reasonOk" class="primary">Sign document</button>
+      </div>
+    </div>
+  </div>
+
   <script src="/vendor/pdfjs/pdf.min.js"></script>
   <script src="/common.js"></script>
   <script src="/sign.js"></script>

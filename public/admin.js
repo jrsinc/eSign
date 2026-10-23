@@ -4,6 +4,7 @@ const actions = $('#docActions');
 let me = null;
 
 const rid = () => Math.random().toString(36).slice(2, 10);
+const REMINDER_LABELS = { none: 'Never', daily: 'Every day', every2days: 'Every 2 days', weekly: 'Every week' };
 
 async function boot() {
   try {
@@ -54,6 +55,7 @@ window.addEventListener('hashchange', () => me && route());
 function route() {
   const m = location.hash.match(/^#\/doc\/([\w-]+)/);
   actions.innerHTML = '';
+  document.onkeydown = null;
   if (m) openDoc(m[1]);
   else showList();
 }
@@ -70,8 +72,9 @@ async function showList() {
           : `<span>⚠️ <strong>Email is off</strong>, so signers won't receive emails. Copy each signer's link from the document page, or add your email settings to the <code>.env</code> file and restart (see README).</span>`}
       </div>
       <div class="drop" id="drop">
-        <strong>Drop a PDF here</strong> or click to upload a document for signature
-        <input type="file" id="file" accept="application/pdf" hidden>
+        <strong>Drop PDFs here</strong> or click to upload a document for signature
+        <div class="small muted" style="margin-top:6px">Choose several PDFs to merge them into one document. You can reorder, rotate or delete pages afterwards.</div>
+        <input type="file" id="file" accept="application/pdf" multiple hidden>
       </div>
       <div class="card" style="margin-top:20px;padding:0">
         <table>
@@ -95,14 +98,14 @@ async function showList() {
   const drop = $('#drop');
   const input = $('#file');
   drop.onclick = () => input.click();
-  input.onchange = () => input.files[0] && uploadPdf(input.files[0]);
+  input.onchange = () => input.files.length && uploadPdfs([...input.files]);
   drop.ondragover = (e) => { e.preventDefault(); drop.classList.add('over'); };
   drop.ondragleave = () => drop.classList.remove('over');
   drop.ondrop = (e) => {
     e.preventDefault();
     drop.classList.remove('over');
-    const f = e.dataTransfer.files[0];
-    if (f) uploadPdf(f);
+    const files = [...e.dataTransfer.files].filter((f) => /pdf$/i.test(f.type) || /\.pdf$/i.test(f.name));
+    if (files.length) uploadPdfs(files);
   };
 
   const docs = await api('/api/documents');
@@ -118,14 +121,15 @@ async function showList() {
   app.querySelectorAll('tr.click').forEach((tr) => (tr.onclick = () => (location.hash = `#/doc/${tr.dataset.id}`)));
 }
 
-async function uploadPdf(file) {
+async function uploadPdfs(files) {
   const fd = new FormData();
-  fd.append('file', file);
+  files.forEach((f) => fd.append('file', f));
+  toast(files.length > 1 ? `Merging ${files.length} files…` : 'Uploading…');
   try {
     const doc = await api('/api/documents', { method: 'POST', body: fd });
     location.hash = `#/doc/${doc.id}`;
   } catch (e) {
-    toast(e.message);
+    toast(e.message, 5000);
   }
 }
 
@@ -140,53 +144,42 @@ async function openDoc(id) {
 }
 
 // ---------------- Draft editor ----------------
+function newField(type, signerId, page, x, y, w, h, extra = {}) {
+  return {
+    id: rid(), signerId, type, page, x, y, w, h,
+    required: !['checkbox', 'radio'].includes(type),
+    label: '', dateFormat: 'MM/DD/YYYY',
+    options: type === 'dropdown' ? ['Option 1', 'Option 2'] : [],
+    group: type === 'radio' ? 'Group 1' : '',
+    style: { font: 'Helvetica', size: 'auto', color: '#000000', align: 'left' },
+    ...extra,
+  };
+}
+
 function showEditor(doc) {
   let activeSigner = doc.signers[0]?.id || null;
   let placing = null;
   let selected = null;
   let pages = [];
   let saveTimer = null;
+  const open = { recipients: true, fields: true, message: false, settings: false };
 
   actions.innerHTML = `
     <span id="saveState" class="small muted"></span>
+    <button id="pagesBtn">📄 Organize pages</button>
     <button id="delDoc" class="ghost danger">Delete</button>
-    <button id="sendBtn" class="primary">Send for signature</button>`;
+    <button id="sendBtn" class="primary">Send</button>`;
 
   app.innerHTML = `
     <div class="editor">
-      <aside class="sidebar">
-        <section>
-          <label for="title">Document title</label>
-          <input id="title" value="${esc(doc.title)}">
-          <label for="msg">Message to signers (optional)</label>
-          <textarea id="msg" rows="3" placeholder="Please review and sign.">${esc(doc.message)}</textarea>
-          <label for="order">Signing order</label>
-          <select id="order">
-            <option value="parallel">Everyone at once</option>
-            <option value="sequential">One after another (in list order)</option>
-          </select>
-        </section>
-        <section>
-          <h3>Signers</h3>
-          <div id="signers"></div>
-          <button id="addSigner" style="width:100%">+ Add signer</button>
-        </section>
-        <section style="border:none">
-          <h3>Fields</h3>
-          <label for="activeSigner">Place fields for</label>
-          <select id="activeSigner"></select>
-          <div class="palette" style="margin-top:10px">
-            ${Object.keys(FIELD_LABELS).map((t) => `<button data-type="${t}">${t === 'checkbox' ? '☑ Checkbox' : FIELD_LABELS[t]}</button>`).join('')}
-          </div>
-          <p class="small muted">Pick a field, then click on the page to drop it. Drag to move, use the corner to resize. Delete key removes the selected field.</p>
-        </section>
-      </aside>
+      <aside class="sidebar" id="sidebar"></aside>
       <div class="viewer" id="viewer"><div class="pages" id="pages"></div></div>
-    </div>`;
+    </div>
+    <div id="ctxMenu" class="ctx hidden"></div>`;
 
-  $('#order').value = doc.signingOrder;
-
-  const colorOf = (sid) => COLORS[doc.signers.findIndex((s) => s.id === sid) % COLORS.length] || '#999';
+  const signerIndex = (sid) => doc.signers.findIndex((s) => s.id === sid);
+  const colorOf = (sid) => COLORS[signerIndex(sid) % COLORS.length] || '#999';
+  const selField = () => doc.fields.find((f) => f.id === selected);
 
   function scheduleSave() {
     $('#saveState').textContent = 'Saving…';
@@ -198,7 +191,10 @@ function showEditor(doc) {
     try {
       await api(`/api/documents/${doc.id}`, {
         method: 'PUT',
-        body: { title: doc.title, message: doc.message, signingOrder: doc.signingOrder, signers: doc.signers, fields: doc.fields },
+        body: {
+          title: doc.title, message: doc.message, emailSubject: doc.emailSubject, signingOrder: doc.signingOrder,
+          reminder: doc.reminder, requireReason: doc.requireReason !== false, signers: doc.signers, fields: doc.fields,
+        },
       });
       $('#saveState').textContent = 'All changes saved';
     } catch (e) {
@@ -207,76 +203,225 @@ function showEditor(doc) {
     }
   }
 
-  $('#title').oninput = (e) => { doc.title = e.target.value; scheduleSave(); };
-  $('#msg').oninput = (e) => { doc.message = e.target.value; scheduleSave(); };
-  $('#order').onchange = (e) => { doc.signingOrder = e.target.value; scheduleSave(); };
+  // ----- Sidebar -----
+  function section(key, title, body) {
+    return `<section class="acc ${open[key] ? 'open' : ''}" data-key="${key}">
+      <button class="acc-head" data-acc="${key}">${title}<span>${open[key] ? '▴' : '▾'}</span></button>
+      <div class="acc-body">${body}</div></section>`;
+  }
 
-  function renderSigners() {
-    $('#signers').innerHTML = doc.signers.map((s, i) => `
-      <div class="signer-row" data-id="${s.id}">
-        <span class="dot" style="background:${COLORS[i % COLORS.length]}"></span>
-        <div>
-          <span class="small muted">Full name</span>
-          <input data-k="name" placeholder="e.g. Jane Doe" value="${esc(s.name)}">
-          <span class="small muted">Email</span>
-          <input data-k="email" type="email" placeholder="jane@company.com" value="${esc(s.email)}">
+  function renderSidebar() {
+    const f = selField();
+    if (f) return renderCustomize(f);
+    const sb = $('#sidebar');
+    sb.innerHTML =
+      section('recipients', 'ADD RECIPIENTS', `
+        <div id="signers">${doc.signers.map((s, i) => `
+          <div class="signer-row" data-id="${s.id}">
+            <span class="dot" style="background:${COLORS[i % COLORS.length]}"></span>
+            <div>
+              <span class="small muted">Full name</span>
+              <input data-k="name" placeholder="e.g. Jane Doe" value="${esc(s.name)}">
+              <span class="small muted">Email</span>
+              <input data-k="email" type="email" placeholder="jane@company.com" value="${esc(s.email)}">
+            </div>
+            <button class="ghost danger" data-rm title="Remove recipient">✕</button>
+          </div>`).join('') || '<p class="small muted">No recipients yet.</p>'}</div>
+        <button id="addSigner" style="width:100%">+ Add recipient</button>
+        <label for="order">Signing order</label>
+        <select id="order">
+          <option value="parallel">Everyone at once</option>
+          <option value="sequential">One after another (in list order)</option>
+        </select>`) +
+      section('fields', 'ADD FIELDS', `
+        <label for="activeSigner" style="margin-top:0">Fields for</label>
+        <select id="activeSigner">${doc.signers.map((s, i) => `<option value="${s.id}">${i + 1}. ${esc(s.name || s.email || '(unnamed)')}</option>`).join('') || '<option value="">Add a recipient first</option>'}</select>
+        <div class="palette">
+          ${Object.entries(FIELD_TYPES).map(([t, d]) => `<button data-type="${t}" class="${placing === t ? 'active' : ''}"><span class="ico">${d.icon}</span>${d.label}</button>`).join('')}
         </div>
-        <button class="ghost danger" data-rm title="Remove signer">✕</button>
-      </div>`).join('') || '<p class="small muted">No signers yet.</p>';
-    $('#signers').querySelectorAll('.signer-row').forEach((row) => {
+        <p class="small muted">Pick a field, then click on the page. Click a placed field to customize it; right-click for more options.</p>`) +
+      section('message', 'ADD MESSAGE', `
+        <label for="title" style="margin-top:0">Agreement name *</label>
+        <input id="title" value="${esc(doc.title)}">
+        <label for="subject">Email subject</label>
+        <input id="subject" value="${esc(doc.emailSubject || '')}" placeholder="Please sign &quot;${esc(doc.title)}&quot;">
+        <label for="msg">Email message</label>
+        <textarea id="msg" rows="4" placeholder="Please review and complete &quot;${esc(doc.title)}&quot;.">${esc(doc.message)}</textarea>
+        <label for="reminder">Send reminder</label>
+        <select id="reminder">${Object.entries(REMINDER_LABELS).map(([k, v]) => `<option value="${k}">${v}</option>`).join('')}</select>`) +
+      section('settings', 'SETTINGS', `
+        <label class="check"><input type="checkbox" id="reqReason"> Ask signers for a reason when they sign</label>
+        <p class="small muted">The reason is recorded in the audit report.</p>`);
+
+    sb.querySelectorAll('[data-acc]').forEach((b) => (b.onclick = () => { open[b.dataset.acc] = !open[b.dataset.acc]; renderSidebar(); }));
+    $('#order').value = doc.signingOrder;
+    $('#order').onchange = (e) => { doc.signingOrder = e.target.value; scheduleSave(); };
+    $('#reminder').value = doc.reminder || 'none';
+    $('#reminder').onchange = (e) => { doc.reminder = e.target.value; scheduleSave(); };
+    $('#reqReason').checked = doc.requireReason !== false;
+    $('#reqReason').onchange = (e) => { doc.requireReason = e.target.checked; scheduleSave(); };
+    $('#title').oninput = (e) => { doc.title = e.target.value; scheduleSave(); };
+    $('#subject').oninput = (e) => { doc.emailSubject = e.target.value; scheduleSave(); };
+    $('#msg').oninput = (e) => { doc.message = e.target.value; scheduleSave(); };
+
+    const sel = $('#activeSigner');
+    if (activeSigner) sel.value = activeSigner;
+    sel.style.borderLeft = `6px solid ${activeSigner ? colorOf(activeSigner) : 'var(--line)'}`;
+    sel.onchange = (e) => { activeSigner = e.target.value; renderSidebar(); };
+
+    sb.querySelectorAll('.signer-row').forEach((row) => {
       const s = doc.signers.find((x) => x.id === row.dataset.id);
-      row.querySelectorAll('input').forEach((inp) => (inp.oninput = () => {
-        s[inp.dataset.k] = inp.value;
-        renderSignerSelect();
-        scheduleSave();
-      }));
+      row.querySelectorAll('input').forEach((inp) => (inp.oninput = () => { s[inp.dataset.k] = inp.value; scheduleSave(); }));
       // An email typed into the name box most likely belongs in the email box.
       row.querySelector('input[data-k="name"]').onblur = () => {
         if (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s.name.trim()) && !s.email.trim()) {
           s.email = s.name.trim();
           s.name = '';
-          renderSigners();
-          renderSignerSelect();
+          renderSidebar();
           scheduleSave();
           toast('Moved the email to the Email box. Please enter the full name.');
           $(`.signer-row[data-id="${s.id}"] input[data-k="name"]`).focus();
-        }
+        } else renderSidebarSelectOnly();
       };
       row.querySelector('[data-rm]').onclick = () => {
         doc.signers = doc.signers.filter((x) => x.id !== s.id);
         doc.fields = doc.fields.filter((f) => f.signerId !== s.id);
         if (activeSigner === s.id) activeSigner = doc.signers[0]?.id || null;
-        renderSigners();
-        renderSignerSelect();
+        renderSidebar();
         renderFields();
         scheduleSave();
       };
     });
+    $('#addSigner').onclick = () => {
+      const s = { id: rid(), name: '', email: '' };
+      doc.signers.push(s);
+      activeSigner = s.id;
+      renderSidebar();
+      $(`.signer-row[data-id="${s.id}"] input`).focus();
+      scheduleSave();
+    };
+    sb.querySelectorAll('.palette button').forEach((b) => (b.onclick = () => {
+      if (!activeSigner) return toast('Add a recipient first');
+      placing = placing === b.dataset.type ? null : b.dataset.type;
+      sb.querySelectorAll('.palette button').forEach((x) => x.classList.toggle('active', x.dataset.type === placing));
+      $('#viewer').classList.toggle('placing', !!placing);
+    }));
   }
-  function renderSignerSelect() {
+  function renderSidebarSelectOnly() {
     const sel = $('#activeSigner');
-    sel.innerHTML = doc.signers.map((s, i) => `<option value="${s.id}">${i + 1}. ${esc(s.name || '(unnamed)')}</option>`).join('') || '<option value="">Add a signer first</option>';
+    if (!sel) return;
+    sel.innerHTML = doc.signers.map((s, i) => `<option value="${s.id}">${i + 1}. ${esc(s.name || s.email || '(unnamed)')}</option>`).join('');
     if (activeSigner) sel.value = activeSigner;
-    sel.style.borderLeft = `6px solid ${activeSigner ? colorOf(activeSigner) : 'var(--line)'}`;
   }
-  $('#activeSigner').onchange = (e) => { activeSigner = e.target.value; renderSignerSelect(); };
-  $('#addSigner').onclick = () => {
-    const s = { id: rid(), name: '', email: '' };
-    doc.signers.push(s);
-    activeSigner = s.id;
-    renderSigners();
-    renderSignerSelect();
-    $(`.signer-row[data-id="${s.id}"] input`).focus();
+
+  function renderCustomize(f) {
+    const sb = $('#sidebar');
+    const st = f.style;
+    const auto = ['date', 'name', 'email'].includes(f.type);
+    sb.innerHTML = `
+      <div class="row" style="margin-bottom:12px"><button class="ghost" id="backBtn">‹</button><h2 style="margin:0">Customize field</h2></div>
+      <h3>Field assigned to</h3>
+      <select id="cfSigner" style="border-left:6px solid ${colorOf(f.signerId)}">${doc.signers.map((s, i) => `<option value="${s.id}">${i + 1}. ${esc(s.name || s.email || '(unnamed)')}</option>`).join('')}</select>
+      <h3 style="margin-top:16px">Customize field type</h3>
+      <label for="cfType" style="margin-top:0">Field type</label>
+      <select id="cfType">${Object.entries(FIELD_TYPES).map(([t, d]) => `<option value="${t}">${d.label}</option>`).join('')}</select>
+      ${f.type === 'date' || f.type === 'datefield' ? `
+        <label for="cfDate">Date format</label>
+        <select id="cfDate">${me.dateFormats.map((d) => `<option>${d}</option>`).join('')}</select>` : ''}
+      <label for="cfName">${f.type === 'radio' ? 'Option label' : 'Field name'}</label>
+      <input id="cfName" value="${esc(f.label)}" placeholder="${esc(FIELD_TYPES[f.type].label)}">
+      ${f.type === 'radio' ? `
+        <label for="cfGroup">Radio group</label>
+        <input id="cfGroup" value="${esc(f.group)}">
+        <p class="small muted">Buttons with the same group name are one question; the signer picks one.</p>` : ''}
+      ${f.type === 'dropdown' ? `
+        <label for="cfOptions">Options (one per line)</label>
+        <textarea id="cfOptions" rows="4">${esc(f.options.join('\n'))}</textarea>` : ''}
+      ${auto ? '<p class="small muted">Filled in automatically when the recipient signs.</p>' : `
+        <label class="check"><input type="checkbox" id="cfReq" ${f.required ? 'checked' : ''}> Required</label>`}
+      ${TEXT_LIKE.includes(f.type) || f.type === 'checkbox' || f.type === 'radio' ? `
+        <h3 style="margin-top:16px">Text format</h3>
+        ${TEXT_LIKE.includes(f.type) ? `
+          <select id="cfFont">${Object.keys(FONT_CSS).map((n) => `<option>${n}</option>`).join('')}</select>
+          <div class="row" style="margin-top:8px">
+            <select id="cfSize" style="width:90px"><option value="auto">Auto</option>${[8, 9, 10, 11, 12, 14, 16, 18, 20, 24].map((n) => `<option>${n}</option>`).join('')}</select>
+            <input id="cfColor" type="color" value="${st.color}" style="width:44px;padding:2px">
+            <div class="seg">${['left', 'center', 'right'].map((a) => `<button data-align="${a}" class="${st.align === a ? 'active' : ''}" title="Align ${a}">${{ left: '⯇', center: '≡', right: '⯈' }[a]}</button>`).join('')}</div>
+          </div>` : `<div class="row"><span class="small">Mark color</span><input id="cfColor" type="color" value="${st.color}" style="width:44px;padding:2px"></div>`}` : ''}
+      <h3 style="margin-top:16px">Advanced field actions</h3>
+      <div class="actions-list">
+        <button class="ghost" id="cfCopy">⧉ Copy field</button>
+        <button class="ghost" id="cfAll">⎘ Copy field to all pages</button>
+        <button class="ghost danger" id="cfDel">🗑 Delete field</button>
+      </div>`;
+
+    const changed = () => { renderFields(); scheduleSave(); };
+    $('#backBtn').onclick = () => { selected = null; renderFields(); renderSidebar(); };
+    $('#cfSigner').value = f.signerId;
+    $('#cfSigner').onchange = (e) => { f.signerId = e.target.value; changed(); renderCustomize(f); };
+    $('#cfType').value = f.type;
+    $('#cfType').onchange = (e) => {
+      const t = e.target.value;
+      Object.assign(f, newField(t, f.signerId, f.page, f.x, f.y, f.w, f.h, { id: f.id, style: f.style, label: f.label }));
+      changed();
+      renderCustomize(f);
+    };
+    if ($('#cfDate')) { $('#cfDate').value = f.dateFormat; $('#cfDate').onchange = (e) => { f.dateFormat = e.target.value; changed(); }; }
+    $('#cfName').oninput = (e) => { f.label = e.target.value; changed(); };
+    if ($('#cfGroup')) $('#cfGroup').oninput = (e) => { f.group = e.target.value; changed(); };
+    if ($('#cfOptions')) $('#cfOptions').oninput = (e) => { f.options = e.target.value.split('\n').map((s) => s.trim()).filter(Boolean); changed(); };
+    if ($('#cfReq')) $('#cfReq').onchange = (e) => { f.required = e.target.checked; changed(); };
+    if ($('#cfFont')) { $('#cfFont').value = st.font; $('#cfFont').onchange = (e) => { st.font = e.target.value; changed(); }; }
+    if ($('#cfSize')) { $('#cfSize').value = String(st.size); $('#cfSize').onchange = (e) => { st.size = e.target.value === 'auto' ? 'auto' : Number(e.target.value); changed(); }; }
+    if ($('#cfColor')) $('#cfColor').oninput = (e) => { st.color = e.target.value; changed(); };
+    $('#sidebar').querySelectorAll('[data-align]').forEach((b) => (b.onclick = () => { st.align = b.dataset.align; changed(); renderCustomize(f); }));
+    $('#cfCopy').onclick = () => copyField(f);
+    $('#cfAll').onclick = () => copyToAllPages(f);
+    $('#cfDel').onclick = () => deleteField(f);
+  }
+
+  // ----- Field actions -----
+  function copyField(f) {
+    const c = { ...structuredClone(f), id: rid(), y: Math.min(1 - f.h, f.y + f.h + 0.01) };
+    doc.fields.push(c);
+    selected = c.id;
+    renderFields();
+    renderSidebar();
     scheduleSave();
-  };
+    toast('Field copied');
+  }
+  function copyToAllPages(f) {
+    let n = 0;
+    pages.forEach((_, pi) => {
+      if (pi === f.page) return;
+      doc.fields.push({ ...structuredClone(f), id: rid(), page: pi });
+      n++;
+    });
+    renderFields();
+    scheduleSave();
+    toast(n ? `Copied to ${n} other page${n > 1 ? 's' : ''}` : 'This document has only one page');
+  }
+  function deleteField(f) {
+    doc.fields = doc.fields.filter((x) => x !== f);
+    if (selected === f.id) selected = null;
+    renderFields();
+    renderSidebar();
+    scheduleSave();
+  }
 
-  app.querySelectorAll('.palette button').forEach((b) => (b.onclick = () => {
-    if (!activeSigner) return toast('Add a signer first');
-    placing = placing === b.dataset.type ? null : b.dataset.type;
-    app.querySelectorAll('.palette button').forEach((x) => x.classList.toggle('active', x.dataset.type === placing));
-    $('#viewer').classList.toggle('placing', !!placing);
-  }));
+  const ctx = $('#ctxMenu');
+  const hideCtx = () => ctx.classList.add('hidden');
+  document.addEventListener('click', hideCtx);
+  function showCtx(f, x, y) {
+    ctx.innerHTML = `<button data-a="copy">⧉ Copy field</button><button data-a="del">🗑 Delete field</button><button data-a="all">⎘ Copy field to all pages</button>`;
+    Object.assign(ctx.style, { left: `${x}px`, top: `${y}px` });
+    ctx.classList.remove('hidden');
+    ctx.querySelector('[data-a=copy]').onclick = () => copyField(f);
+    ctx.querySelector('[data-a=del]').onclick = () => deleteField(f);
+    ctx.querySelector('[data-a=all]').onclick = () => copyToAllPages(f);
+  }
 
+  // ----- Fields on the page -----
   function renderFields() {
     pages.forEach((p, pi) => {
       p.layer.innerHTML = '';
@@ -284,38 +429,47 @@ function showEditor(doc) {
     });
   }
 
+  function fieldText(f) {
+    if (f.type === 'checkbox' || f.type === 'radio') return '';
+    if (f.type === 'date') return `${FIELD_TYPES.date.label} (${f.dateFormat.toLowerCase()})`;
+    if (f.type === 'datefield') return `${f.label || 'Date'} (${f.dateFormat.toLowerCase()})`;
+    if (f.type === 'dropdown') return `${f.label || 'Select'} ▾`;
+    return f.label || FIELD_TYPES[f.type].label;
+  }
+
   function fieldEl(f, p) {
     const el = document.createElement('div');
-    el.className = `field${selected === f.id ? ' sel' : ''}`;
+    el.className = `field ftype-${f.type}${selected === f.id ? ' sel' : ''}`;
     el.style.setProperty('--c', colorOf(f.signerId));
     const place = () => Object.assign(el.style, { left: `${f.x * 100}%`, top: `${f.y * 100}%`, width: `${f.w * 100}%`, height: `${f.h * 100}%` });
     place();
+    if (TEXT_LIKE.includes(f.type)) {
+      el.style.fontFamily = FONT_CSS[f.style.font];
+      el.style.justifyContent = { left: 'flex-start', center: 'center', right: 'flex-end' }[f.style.align];
+      el.style.fontSize = f.style.size === 'auto' ? '' : `${f.style.size * (p.layer.clientWidth / p.width)}px`;
+    }
     const signer = doc.signers.find((s) => s.id === f.signerId);
-    const initials = (signer?.name || '?').split(/\s+/).map((w) => w[0]).join('').slice(0, 3).toUpperCase();
-    el.innerHTML = `<span>${f.type === 'checkbox' ? '' : `${FIELD_LABELS[f.type]} · ${esc(initials)}`}</span><button class="del" title="Delete">×</button><span class="grip"></span>`;
-    el.title = `${FIELD_LABELS[f.type]} for ${signer?.name || 'signer'}${f.type === 'text' ? ' (double-click to set a label)' : ''}`;
+    el.innerHTML = `${f.required && !['date', 'name', 'email'].includes(f.type) ? '<span class="req">*</span>' : ''}<span class="ftext">${esc(fieldText(f))}</span><span class="grip"></span>`;
+    el.title = `${FIELD_TYPES[f.type].label}${f.label ? ` "${f.label}"` : ''} for ${signer?.name || 'recipient'}${f.type === 'radio' ? ` (group ${f.group})` : ''}`;
 
-    el.querySelector('.del').onpointerdown = (e) => e.stopPropagation();
-    el.querySelector('.del').onclick = (e) => {
+    el.oncontextmenu = (e) => {
+      e.preventDefault();
       e.stopPropagation();
-      doc.fields = doc.fields.filter((x) => x !== f);
+      selected = f.id;
       renderFields();
-      scheduleSave();
-    };
-    el.ondblclick = (e) => {
-      e.stopPropagation();
-      if (f.type !== 'text' && f.type !== 'checkbox') return;
-      const label = prompt('Label shown to the signer:', f.label || '');
-      if (label !== null) f.label = label;
-      if (f.type === 'checkbox') f.required = confirm('Must the signer tick this checkbox?');
-      scheduleSave();
+      renderSidebar();
+      showCtx(f, e.clientX, e.clientY);
     };
     el.onpointerdown = (e) => {
+      if (e.button === 2) return;
       e.stopPropagation();
       e.preventDefault();
+      hideCtx();
+      const wasSelected = selected === f.id;
       selected = f.id;
       p.layer.querySelectorAll('.field').forEach((x) => x.classList.remove('sel'));
       el.classList.add('sel');
+      if (!wasSelected) renderSidebar();
       const resizing = e.target.classList.contains('grip');
       const rect = p.layer.getBoundingClientRect();
       const start = { x: e.clientX, y: e.clientY, f: { ...f } };
@@ -324,8 +478,8 @@ function showEditor(doc) {
         const dx = (ev.clientX - start.x) / rect.width;
         const dy = (ev.clientY - start.y) / rect.height;
         if (resizing) {
-          f.w = Math.min(1 - f.x, Math.max(10 / p.width, start.f.w + dx));
-          f.h = Math.min(1 - f.y, Math.max(10 / p.height, start.f.h + dy));
+          f.w = Math.min(1 - f.x, Math.max(8 / p.width, start.f.w + dx));
+          f.h = Math.min(1 - f.y, Math.max(8 / p.height, start.f.h + dy));
         } else {
           f.x = Math.min(1 - f.w, Math.max(0, start.f.x + dx));
           f.y = Math.min(1 - f.h, Math.max(0, start.f.y + dy));
@@ -341,16 +495,15 @@ function showEditor(doc) {
   }
 
   document.onkeydown = (e) => {
-    if ((e.key === 'Delete' || e.key === 'Backspace') && selected && !/INPUT|TEXTAREA|SELECT/.test(document.activeElement.tagName)) {
-      doc.fields = doc.fields.filter((x) => x.id !== selected);
-      selected = null;
-      renderFields();
-      scheduleSave();
-    }
+    const typing = /INPUT|TEXTAREA|SELECT/.test(document.activeElement.tagName);
+    if ((e.key === 'Delete' || e.key === 'Backspace') && selected && !typing) deleteField(selField());
     if (e.key === 'Escape') {
       placing = null;
-      app.querySelectorAll('.palette button').forEach((x) => x.classList.remove('active'));
+      selected = null;
+      hideCtx();
       $('#viewer').classList.remove('placing');
+      renderFields();
+      renderSidebar();
     }
   };
 
@@ -363,8 +516,8 @@ function showEditor(doc) {
   $('#sendBtn').onclick = async () => {
     try {
       await save();
-      const who = doc.signers.map((s) => `• ${s.name} <${s.email}>`).join('\n');
-      if (!confirm(`Send "${doc.title}" for signature to:\n${who}\n\nThe document can't be edited after sending.`)) return;
+      const list = doc.signers.map((s) => `• ${s.name} <${s.email}>`).join('\n');
+      if (!confirm(`Send "${doc.title}" for signature to:\n${list}\n\nThe document can't be edited after sending.`)) return;
       const sent = await api(`/api/documents/${doc.id}/send`, { method: 'POST' });
       toast(me.mail ? 'Sent! Invitations emailed.' : 'Sent! Copy each signer\'s link to share it.');
       showDetail(sent);
@@ -373,30 +526,156 @@ function showEditor(doc) {
     }
   };
 
-  renderSigners();
-  renderSignerSelect();
+  $('#pagesBtn').onclick = async () => {
+    await save().catch(() => {});
+    showOrganizer(doc);
+  };
+
+  renderSidebar();
   renderPdf(`/api/documents/${doc.id}/original`, $('#pages')).then((ps) => {
     pages = ps;
     pages.forEach((p, pi) => {
       p.layer.onpointerdown = (e) => {
+        hideCtx();
+        const hadSelection = !!selected;
         selected = null;
         p.layer.querySelectorAll('.field').forEach((x) => x.classList.remove('sel'));
-        if (!placing || !activeSigner) return;
+        if (!placing || !activeSigner) {
+          if (hadSelection) renderSidebar();
+          return;
+        }
         const rect = p.layer.getBoundingClientRect();
-        const [pw, ph] = FIELD_SIZES[placing];
+        const [pw, ph] = FIELD_TYPES[placing].size;
         const w = pw / p.width;
         const h = ph / p.height;
         const x = Math.min(1 - w, Math.max(0, (e.clientX - rect.left) / rect.width - w / 2));
         const y = Math.min(1 - h, Math.max(0, (e.clientY - rect.top) / rect.height - h / 2));
-        const f = { id: rid(), signerId: activeSigner, type: placing, page: pi, x, y, w, h, required: placing !== 'checkbox', label: '' };
+        const extra = {};
+        if (placing === 'radio') {
+          const n = doc.fields.filter((f) => f.type === 'radio' && f.signerId === activeSigner).length;
+          extra.label = `Option ${n + 1}`;
+        }
+        const f = newField(placing, activeSigner, pi, x, y, w, h, extra);
         doc.fields.push(f);
         selected = f.id;
         renderFields();
+        renderSidebar();
         scheduleSave();
       };
     });
     renderFields();
   });
+}
+
+// ---------------- Organize pages / merge files ----------------
+async function showOrganizer(doc) {
+  document.onkeydown = null;
+  const sources = { doc: await pdfjsLib.getDocument(`/api/documents/${doc.id}/original`).promise };
+  const names = { doc: doc.title };
+  let items = [];
+  for (let i = 0; i < sources.doc.numPages; i++) items.push({ key: rid(), src: 'doc', index: i, rotate: 0 });
+  const fieldsOn = (i) => doc.fields.filter((f) => f.page === i).length;
+
+  actions.innerHTML = `
+    <button id="orgCancel">Cancel</button>
+    <button id="orgApply" class="primary">Apply changes</button>`;
+  app.innerHTML = `
+    <div class="wrap" style="max-width:1200px">
+      <div class="card row" style="flex-wrap:wrap;margin-bottom:16px">
+        <div style="flex:1;min-width:240px"><h2 style="margin:0">Organize pages</h2>
+          <span class="small muted">Drag pages to reorder. Rotate or delete pages, or add more PDFs to merge them in.</span></div>
+        <button id="addFiles">+ Add PDF files</button>
+        <input type="file" id="moreFiles" accept="application/pdf" multiple hidden>
+      </div>
+      <div class="thumbs" id="thumbs"></div>
+    </div>`;
+
+  let dragKey = null;
+  async function render() {
+    const grid = $('#thumbs');
+    grid.innerHTML = '';
+    for (const [n, it] of items.entries()) {
+      const card = document.createElement('div');
+      card.className = 'thumb';
+      card.draggable = true;
+      const nf = it.src === 'doc' ? fieldsOn(it.index) : 0;
+      card.innerHTML = `
+        <div class="thumb-img"><canvas></canvas></div>
+        <div class="thumb-bar">
+          <strong>${n + 1}</strong>
+          <span class="small muted" title="${esc(names[it.src])}">${it.src === 'doc' ? '' : '+ '}${esc(names[it.src]).slice(0, 14)}${nf ? ` · ${nf} field${nf > 1 ? 's' : ''}` : ''}</span>
+        </div>
+        <div class="thumb-tools">
+          <button data-a="left" title="Move left">◀</button>
+          <button data-a="ccw" title="Rotate left">⟲</button>
+          <button data-a="cw" title="Rotate right">⟳</button>
+          <button data-a="del" title="Delete page" class="danger">🗑</button>
+          <button data-a="right" title="Move right">▶</button>
+        </div>`;
+      card.ondragstart = () => { dragKey = it.key; card.classList.add('dragging'); };
+      card.ondragend = () => card.classList.remove('dragging');
+      card.ondragover = (e) => e.preventDefault();
+      card.ondrop = (e) => {
+        e.preventDefault();
+        const from = items.findIndex((x) => x.key === dragKey);
+        if (from < 0 || from === n) return;
+        const [moved] = items.splice(from, 1);
+        items.splice(n, 0, moved);
+        render();
+      };
+      card.querySelectorAll('[data-a]').forEach((b) => (b.onclick = () => {
+        const a = b.dataset.a;
+        if (a === 'cw') it.rotate = (it.rotate + 90) % 360;
+        if (a === 'ccw') it.rotate = (it.rotate + 270) % 360;
+        if (a === 'del') {
+          if (items.length === 1) return toast('A document needs at least one page');
+          items.splice(n, 1);
+        }
+        if (a === 'left' && n > 0) [items[n - 1], items[n]] = [items[n], items[n - 1]];
+        if (a === 'right' && n < items.length - 1) [items[n + 1], items[n]] = [items[n], items[n + 1]];
+        render();
+      }));
+      grid.append(card);
+      const page = await sources[it.src].getPage(it.index + 1);
+      await renderThumb(page, card.querySelector('canvas'), it.rotate);
+    }
+  }
+
+  $('#addFiles').onclick = () => $('#moreFiles').click();
+  $('#moreFiles').onchange = async () => {
+    const fd = new FormData();
+    [...$('#moreFiles').files].forEach((f) => fd.append('file', f));
+    try {
+      const added = await api(`/api/documents/${doc.id}/sources`, { method: 'POST', body: fd });
+      for (const s of added) {
+        sources[s.id] = await pdfjsLib.getDocument(`/api/documents/${doc.id}/sources/${s.id}`).promise;
+        names[s.id] = s.name;
+        for (let i = 0; i < s.pages; i++) items.push({ key: rid(), src: s.id, index: i, rotate: 0 });
+      }
+      toast(`Added ${added.length} file${added.length > 1 ? 's' : ''}`);
+      render();
+    } catch (e) {
+      toast(e.message, 5000);
+    }
+    $('#moreFiles').value = '';
+  };
+  $('#orgCancel').onclick = () => openDoc(doc.id);
+  $('#orgApply').onclick = async () => {
+    const kept = new Set(items.filter((i) => i.src === 'doc').map((i) => i.index));
+    const lost = doc.fields.filter((f) => !kept.has(f.page)).length;
+    if (lost && !confirm(`${lost} field${lost > 1 ? 's are' : ' is'} on deleted pages and will be removed. Continue?`)) return;
+    $('#orgApply').disabled = true;
+    try {
+      const updated = await api(`/api/documents/${doc.id}/pages`, { method: 'POST', body: { pages: items.map(({ src, index, rotate }) => ({ src, index, rotate })) } });
+      toast('Pages updated');
+      actions.innerHTML = '';
+      showEditor(updated);
+    } catch (e) {
+      toast(e.message, 5000);
+      $('#orgApply').disabled = false;
+    }
+  };
+  render();
 }
 
 // ---------------- Sent / completed view ----------------
@@ -406,7 +685,7 @@ function showDetail(doc) {
   const done = doc.status === 'completed';
   actions.innerHTML = `
     ${done ? `<a class="btn primary" href="/api/documents/${doc.id}/signed">Download signed PDF</a>` : ''}
-    ${doc.status === 'sent' ? '<button id="voidBtn" class="danger">Void</button>' : ''}
+    ${doc.status === 'sent' ? '<button id="voidBtn" class="danger">Cancel agreement</button>' : ''}
     <button id="delDoc" class="ghost danger">Delete</button>`;
 
   app.innerHTML = `
@@ -415,18 +694,19 @@ function showDetail(doc) {
         <section>
           <h2>${esc(doc.title)}</h2>
           <span class="badge ${doc.status}">${doc.status}</span>
-          <p class="small muted" style="margin:10px 0 0">Envelope ID: ${doc.id}<br>Sent ${when(doc.sentAt)}${done ? `<br>Completed ${when(doc.completedAt)}` : ''}</p>
+          <p class="small muted" style="margin:10px 0 0">Transaction ID: ${esc(doc.transactionId || doc.id)}<br>Sent ${when(doc.sentAt)}${done ? `<br>Completed ${when(doc.completedAt)}` : ''}
+          ${doc.status === 'sent' ? `<br>Reminders: ${REMINDER_LABELS[doc.reminder || 'none']}` : ''}</p>
           ${done ? `<p class="small muted" style="word-break:break-all">Signed file SHA-256:<br>${doc.finalHash}</p>` : ''}
         </section>
         <section>
-          <h3>Signers${doc.signingOrder === 'sequential' ? ' (in order)' : ''}</h3>
+          <h3>Recipients${doc.signingOrder === 'sequential' ? ' (in order)' : ''}</h3>
           ${doc.signers.map((s) => `
             <div class="signer-row" style="grid-template-columns:12px 1fr">
               <span class="dot" style="background:${s.color}"></span>
               <div>
                 <strong>${esc(s.name)}</strong> <span class="badge ${s.status}">${s.status}</span><br>
                 <span class="small muted">${esc(s.email)}</span>
-                ${s.signedAt ? `<div class="small muted">Signed ${when(s.signedAt)} · IP ${esc(s.ip)}</div>` : ''}
+                ${s.signedAt ? `<div class="small muted">Signed ${when(s.signedAt)} · IP ${esc(s.ip)}${s.reason ? `<br>Reason: ${esc(s.reason)}` : ''}</div>` : ''}
                 ${doc.status === 'sent' && s.status !== 'signed' ? `
                   <div class="linkbox"><input readonly value="${esc(s.link)}"><button data-copy="${esc(s.link)}">Copy</button></div>
                   ${me.mail ? `<button class="ghost small" data-remind="${s.id}" style="padding:4px 0">Send reminder</button>` : ''}` : ''}
@@ -435,7 +715,7 @@ function showDetail(doc) {
         </section>
         <section style="border:none">
           <h3>Audit trail</h3>
-          <ul class="events">${doc.events.slice().reverse().map((e) => `<li><span class="muted small">${when(e.at)}</span><br>${esc(e.text)}</li>`).join('')}</ul>
+          <ul class="events">${doc.events.slice().reverse().map((e) => `<li><span class="muted small">${when(e.at)}</span><br>${esc(e.text)}${e.detail ? `<br><span class="small muted">${esc(e.detail)}</span>` : ''}</li>`).join('')}</ul>
         </section>
       </aside>
       <div class="viewer"><div class="pages" id="pages"></div></div>
@@ -452,7 +732,7 @@ function showDetail(doc) {
     } catch (e) { toast(e.message); }
   }));
   $('#voidBtn') && ($('#voidBtn').onclick = async () => {
-    const reason = prompt('Void this document? Signers will no longer be able to sign.\nReason (optional):');
+    const reason = prompt('Cancel this agreement? Recipients will no longer be able to sign.\nReason (optional):');
     if (reason === null) return;
     showDetail(await api(`/api/documents/${doc.id}/void`, { method: 'POST', body: { reason } }));
   });
@@ -467,9 +747,9 @@ function showDetail(doc) {
     pages.forEach((p, pi) => doc.fields.filter((f) => f.page === pi).forEach((f) => {
       const s = doc.signers.find((x) => x.id === f.signerId);
       const el = document.createElement('div');
-      el.className = 'field';
+      el.className = `field ftype-${f.type}`;
       el.style.cssText = `--c:${s?.color};left:${f.x * 100}%;top:${f.y * 100}%;width:${f.w * 100}%;height:${f.h * 100}%;cursor:default`;
-      el.textContent = f.value && f.type !== 'checkbox' ? (f.value === '[signed]' ? '✓ Signed' : f.value) : f.type === 'checkbox' ? '' : FIELD_LABELS[f.type];
+      el.textContent = f.value && !['checkbox', 'radio'].includes(f.type) ? (f.value === '[signed]' ? '✓ Signed' : f.value) : ['checkbox', 'radio'].includes(f.type) ? (f.value === 'true' ? '✓' : '') : (f.label || FIELD_TYPES[f.type]?.label || f.type);
       p.layer.append(el);
     }));
   });

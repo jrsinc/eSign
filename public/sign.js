@@ -4,6 +4,7 @@ const values = {};
 const adopted = {}; // { signature: dataUrl, initials: dataUrl }
 let info = null;
 let fieldEls = [];
+let appearance = 'DRAW';
 
 function message(title, body) {
   $('#bar').classList.add('hidden');
@@ -41,43 +42,117 @@ async function load() {
   $('#bar').classList.remove('hidden');
 
   const pages = await renderPdf(`/api/sign/${encodeURIComponent(token)}/file`, $('#pages'));
-  const today = new Date().toISOString().slice(0, 10);
   fieldEls = info.fields.map((f) => {
     const el = document.createElement('div');
+    const st = f.style || {};
     el.className = 'field signer-field';
     el.style.cssText = `--c:${info.signer.color};left:${f.x * 100}%;top:${f.y * 100}%;width:${f.w * 100}%;height:${f.h * 100}%`;
     el.dataset.id = f.id;
-    if (f.type === 'date') { el.textContent = today; el.classList.add('done'); values[f.id] = today; }
-    else if (f.type === 'name') { el.textContent = info.signer.name; el.classList.add('done'); values[f.id] = info.signer.name; }
-    else if (f.type === 'text') {
-      const inp = document.createElement('input');
-      inp.type = 'text';
-      inp.placeholder = f.label || (f.required ? 'Required' : 'Optional');
-      inp.title = f.label || 'Text';
-      inp.oninput = () => { values[f.id] = inp.value; el.classList.toggle('done', !!inp.value.trim()); updateProgress(); };
+    el.title = f.label || FIELD_TYPES[f.type]?.label || '';
+    const styled = (node) => {
+      node.style.fontFamily = FONT_CSS[st.font] || '';
+      node.style.color = st.color || '';
+      node.style.textAlign = st.align || 'left';
+      return node;
+    };
+    const auto = (text) => {
+      el.append(styled(Object.assign(document.createElement('span'), { textContent: text, className: 'ftext' })));
+      el.style.justifyContent = { center: 'center', right: 'flex-end' }[st.align] || 'flex-start';
+      el.classList.add('done');
+    };
+    const input = (type, placeholder) => {
+      const inp = styled(document.createElement('input'));
+      inp.type = type;
+      inp.placeholder = placeholder;
+      inp.oninput = inp.onchange = () => {
+        values[f.id] = inp.value;
+        el.classList.toggle('done', !!inp.value.trim() || !f.required);
+        // Company and title are the same everywhere they appear.
+        if (f.type === 'company' || f.type === 'title') {
+          for (const o of fieldEls) if (o.f.type === f.type && o.f.id !== f.id) {
+            values[o.f.id] = inp.value;
+            o.el.querySelector('input').value = inp.value;
+            o.el.classList.toggle('done', !!inp.value.trim() || !o.f.required);
+          }
+        }
+        updateProgress();
+      };
       el.append(inp);
-    } else if (f.type === 'checkbox') {
-      el.classList.add('cb');
-      el.title = f.label || 'Checkbox';
-      el.onclick = () => { values[f.id] = !values[f.id]; el.textContent = values[f.id] ? '✓' : ''; el.classList.toggle('done', values[f.id]); updateProgress(); };
       if (!f.required) el.classList.add('done');
-    } else {
-      el.textContent = f.type === 'signature' ? 'Click to sign' : 'Initial';
-      el.onclick = () => (adopted[f.type] ? applySig(f.type) : openPad(f.type));
+    };
+
+    switch (f.type) {
+      case 'date': auto(formatToday(f.dateFormat)); break;
+      case 'name': auto(info.signer.name); break;
+      case 'email': auto(info.signer.email); break;
+      case 'datefield': input('date', f.label || 'Date'); break;
+      case 'number': input('number', f.label || 'Number'); break;
+      case 'company': input('text', f.label || 'Company'); break;
+      case 'title': input('text', f.label || 'Title'); break;
+      case 'text': input('text', f.label || (f.required ? 'Required' : 'Optional')); break;
+      case 'dropdown': {
+        const sel = styled(document.createElement('select'));
+        sel.innerHTML = `<option value="">${esc(f.label || 'Select…')}</option>${f.options.map((o) => `<option>${esc(o)}</option>`).join('')}`;
+        sel.onchange = () => { values[f.id] = sel.value; el.classList.toggle('done', !!sel.value || !f.required); updateProgress(); };
+        el.append(sel);
+        if (!f.required) el.classList.add('done');
+        break;
+      }
+      case 'checkbox':
+        el.classList.add('cb');
+        el.onclick = () => { values[f.id] = !values[f.id]; el.textContent = values[f.id] ? '✓' : ''; el.classList.toggle('done', values[f.id] || !f.required); updateProgress(); };
+        if (!f.required) el.classList.add('done');
+        break;
+      case 'radio':
+        el.classList.add('cb', 'radio');
+        el.title = `${f.label}${f.group ? ` (${f.group})` : ''}`;
+        el.onclick = () => {
+          const group = f.group || f.id;
+          for (const o of fieldEls) if (o.f.type === 'radio' && (o.f.group || o.f.id) === group) {
+            values[o.f.id] = o.f.id === f.id;
+            o.el.textContent = values[o.f.id] ? '●' : '';
+            o.el.classList.add('done');
+          }
+          updateProgress();
+        };
+        break;
+      default:
+        el.textContent = f.type === 'signature' ? 'Click to sign' : 'Initial';
+        el.onclick = () => (adopted[f.type] ? applySig(f.type) : openPad(f.type));
     }
     pages[f.page]?.layer.append(el);
     return { f, el };
   });
+  // Radio groups that need no answer start out complete.
+  for (const { f, el } of fieldEls) {
+    if (f.type !== 'radio') continue;
+    const group = fieldEls.filter((o) => o.f.type === 'radio' && (o.f.group || o.f.id) === (f.group || f.id));
+    if (!group.some((o) => o.f.required)) el.classList.add('done');
+  }
   updateProgress();
 }
 
 function remaining() {
-  return fieldEls.filter(({ f }) => {
-    if (f.type === 'signature' || f.type === 'initials') return !values[f.id];
-    if (f.type === 'text') return f.required && !String(values[f.id] || '').trim();
-    if (f.type === 'checkbox') return f.required && !values[f.id];
-    return false;
-  });
+  const out = [];
+  const seenGroups = new Set();
+  for (const item of fieldEls) {
+    const { f } = item;
+    const v = values[f.id];
+    if (f.type === 'signature' || f.type === 'initials') {
+      if (!v) out.push(item);
+    } else if (['text', 'company', 'title', 'number', 'datefield', 'dropdown'].includes(f.type)) {
+      if (f.required && !String(v || '').trim()) out.push(item);
+    } else if (f.type === 'checkbox') {
+      if (f.required && !v) out.push(item);
+    } else if (f.type === 'radio') {
+      const group = f.group || f.id;
+      if (seenGroups.has(group)) continue;
+      seenGroups.add(group);
+      const list = fieldEls.filter((o) => o.f.type === 'radio' && (o.f.group || o.f.id) === group);
+      if (list.some((o) => o.f.required) && !list.some((o) => values[o.f.id])) out.push(item);
+    }
+  }
+  return out;
 }
 
 function updateProgress() {
@@ -212,6 +287,7 @@ $('#adoptSig').onclick = () => {
   }
   if (!url) return toast('Signature is empty');
   adopted[padType] = url;
+  if (padType === 'signature') appearance = mode === 'draw' ? 'DRAW' : 'TYPE';
   applySig(padType);
   $('#modal').classList.add('hidden');
 };
@@ -227,10 +303,35 @@ $('#finishBtn').onclick = async () => {
     toast('Please tick the consent box to sign electronically');
     return $('#consent').focus();
   }
+  if (info.requireReason) return askReason();
+  submit('');
+};
+
+// Ask why the signer is signing; the answer goes into the audit report.
+function askReason() {
+  $('#reasonList').innerHTML = [...info.reasons, 'Other'].map((r, i) =>
+    `<label><input type="radio" name="reason" value="${esc(r)}" ${i === 0 ? 'checked' : ''}> ${esc(r === 'Other' ? 'Other (type your own)' : r)}</label>`).join('');
+  const other = $('#reasonOther');
+  other.value = '';
+  other.classList.add('hidden');
+  $('#reasonList').onchange = () => other.classList.toggle('hidden', $('input[name=reason]:checked').value !== 'Other');
+  $('#reasonModal').classList.remove('hidden');
+}
+$('#reasonCancel').onclick = () => $('#reasonModal').classList.add('hidden');
+$('#reasonOk').onclick = () => {
+  const picked = $('input[name=reason]:checked').value;
+  const reason = picked === 'Other' ? $('#reasonOther').value.trim() : picked;
+  if (!reason) return toast('Please type your reason');
+  $('#reasonModal').classList.add('hidden');
+  submit(reason);
+};
+
+async function submit(reason) {
   $('#finishBtn').disabled = true;
   $('#finishBtn').textContent = 'Signing…';
   try {
-    const r = await api(`/api/sign/${encodeURIComponent(token)}`, { method: 'POST', body: { consent: true, values } });
+    const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    const r = await api(`/api/sign/${encodeURIComponent(token)}`, { method: 'POST', body: { consent: true, values, reason, tz, appearance } });
     window.scrollTo(0, 0);
     if (r.completed) load();
     else message('You have signed ✓', '<p class="muted">Thank you. We\'ll email you the completed copy once everyone has signed.</p>');
@@ -239,7 +340,7 @@ $('#finishBtn').onclick = async () => {
     $('#finishBtn').disabled = false;
     $('#finishBtn').textContent = 'Finish';
   }
-};
+}
 
 $('#declineBtn').onclick = async () => {
   const reason = prompt('Decline to sign? The sender will be notified and the document will be cancelled.\nReason (optional):');

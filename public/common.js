@@ -1,9 +1,41 @@
-// Shared helpers: PDF rendering, fetch wrapper, small UI utilities.
+// Shared helpers: PDF rendering, field catalog, date formatting, fetch wrapper, small UI utilities.
 pdfjsLib.GlobalWorkerOptions.workerSrc = '/vendor/pdfjs/pdf.worker.min.js';
 
-const FIELD_LABELS = { signature: 'Signature', initials: 'Initials', date: 'Date signed', name: 'Full name', text: 'Text', checkbox: '☐' };
-// Default field size in PDF points.
-const FIELD_SIZES = { signature: [170, 42], initials: [70, 36], date: [100, 22], name: [150, 22], text: [150, 22], checkbox: [18, 18] };
+// Field catalog: label, icon and default size in PDF points.
+const FIELD_TYPES = {
+  signature: { label: 'E-signature', icon: '✍', size: [170, 42] },
+  initials: { label: 'Initials', icon: 'IN', size: [70, 36] },
+  text: { label: 'Text', icon: 'T', size: [150, 22] },
+  date: { label: 'Date of signing', icon: '📅', size: [110, 22] },
+  name: { label: 'Recipient name', icon: '👤', size: [150, 22] },
+  email: { label: 'Recipient email', icon: '✉', size: [170, 22] },
+  datefield: { label: 'Date', icon: '🗓', size: [110, 22] },
+  number: { label: 'Number', icon: '#', size: [90, 22] },
+  checkbox: { label: 'Checkbox', icon: '☑', size: [16, 16] },
+  radio: { label: 'Radio button', icon: '◉', size: [16, 16] },
+  dropdown: { label: 'Drop-down menu', icon: '▾', size: [140, 22] },
+  company: { label: 'Company', icon: '🏢', size: [170, 22] },
+  title: { label: 'Title', icon: '🪪', size: [170, 22] },
+};
+const TEXT_LIKE = ['text', 'date', 'name', 'email', 'datefield', 'number', 'dropdown', 'company', 'title'];
+const FONT_CSS = { Helvetica: 'Helvetica, Arial, sans-serif', Times: '"Times New Roman", Times, serif', Courier: '"Courier New", Courier, monospace' };
+
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+function formatYMD(Y, M, D, fmt) {
+  const mon = MONTHS[Number(M) - 1];
+  switch (fmt) {
+    case 'DD/MM/YYYY': return `${D}/${M}/${Y}`;
+    case 'YYYY-MM-DD': return `${Y}-${M}-${D}`;
+    case 'DD-Mon-YYYY': return `${D}-${mon}-${Y}`;
+    case 'Mon DD, YYYY': return `${mon} ${D}, ${Y}`;
+    case 'DD.MM.YYYY': return `${D}.${M}.${Y}`;
+    default: return `${M}/${D}/${Y}`;
+  }
+}
+function formatToday(fmt) {
+  const d = new Date();
+  return formatYMD(d.getFullYear(), String(d.getMonth() + 1).padStart(2, '0'), String(d.getDate()).padStart(2, '0'), fmt);
+}
 
 async function renderPdf(url, container) {
   container.innerHTML = '<p class="muted">Loading document…</p>';
@@ -37,6 +69,16 @@ async function renderPdf(url, container) {
   return pages;
 }
 
+// Small page preview, with an extra clockwise rotation applied.
+async function renderThumb(pdfPage, canvas, extraRotation = 0, width = 140) {
+  const rotation = (pdfPage.rotate + extraRotation) % 360;
+  const base = pdfPage.getViewport({ scale: 1, rotation });
+  const vp = pdfPage.getViewport({ scale: width / base.width, rotation });
+  canvas.width = vp.width;
+  canvas.height = vp.height;
+  await pdfPage.render({ canvasContext: canvas.getContext('2d'), viewport: vp, intent: 'print' }).promise;
+}
+
 async function api(url, opts = {}) {
   const init = { ...opts, headers: { ...(opts.headers || {}) } };
   if (opts.body && !(opts.body instanceof FormData)) {
@@ -64,3 +106,17 @@ function toast(msg, ms = 2600) {
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const when = (iso) => (iso ? new Date(iso).toLocaleString() : '—');
 const $ = (sel, root = document) => root.querySelector(sel);
+
+// Shows the company logo (public/logo.png) in the header when it exists.
+function showLogo() {
+  const img = new Image();
+  img.onload = () => {
+    const logo = $('.logo');
+    if (!logo) return;
+    img.alt = 'Logo';
+    img.style.height = '32px';
+    logo.querySelector('svg')?.replaceWith(img);
+  };
+  img.src = '/logo.png';
+}
+showLogo();
