@@ -62,6 +62,13 @@ function route() {
 async function showList() {
   app.innerHTML = `
     <div class="wrap">
+      <div class="card row" style="margin-bottom:16px;padding:12px 16px;flex-wrap:wrap;${me.mail ? '' : 'background:#fffbeb;border-color:#fde68a'}">
+        ${me.mail
+          ? `<span style="flex:1;min-width:220px">✉️ <strong>Email is on.</strong> Signers get their links by email${me.notify ? `, and status updates go to ${esc(me.notify)}` : ''}.</span>
+             <input id="testTo" type="email" placeholder="you@company.com" style="width:220px">
+             <button id="testBtn">Send test email</button>`
+          : `<span>⚠️ <strong>Email is off</strong>, so signers won't receive emails. Copy each signer's link from the document page, or add your email settings to the <code>.env</code> file and restart (see README).</span>`}
+      </div>
       <div class="drop" id="drop">
         <strong>Drop a PDF here</strong> or click to upload a document for signature
         <input type="file" id="file" accept="application/pdf" hidden>
@@ -73,6 +80,18 @@ async function showList() {
         </table>
       </div>
     </div>`;
+  if ($('#testBtn')) {
+    $('#testBtn').onclick = async () => {
+      $('#testBtn').disabled = true;
+      try {
+        await api('/api/test-email', { method: 'POST', body: { to: $('#testTo').value } });
+        toast('Test email sent. Check your inbox (and junk folder).', 4000);
+      } catch (e) {
+        toast(e.message, 8000);
+      }
+      $('#testBtn').disabled = false;
+    };
+  }
   const drop = $('#drop');
   const input = $('#file');
   drop.onclick = () => input.click();

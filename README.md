@@ -36,11 +36,19 @@ Open http://localhost:3000. The default password is `admin`.
 | `DATA_DIR` | Where the database and PDFs are stored | `./data` |
 | `SMTP_HOST`, `SMTP_PORT`, `SMTP_SECURE`, `SMTP_USER`, `SMTP_PASS`, `MAIL_FROM` | Outgoing email (e.g. Gmail, Microsoft 365, SendGrid SMTP) | email off |
 
-Example on Windows PowerShell:
+| `NOTIFY_EMAIL` | Gets "X signed", "declined" and "completed" emails (with the signed PDF) | off |
 
-```powershell
-$env:ADMIN_PASSWORD="a-strong-password"; $env:COMPANY_NAME="Acme Ltd"; npm start
-```
+The easiest way is a `.env` file: copy `.env.example` to `.env`, fill it in, and restart. `.env` is git-ignored.
+
+### Email with Microsoft 365 (Outlook)
+
+1. Pick a mailbox to send from, e.g. `esign@yourcompany.com` (a normal licensed user or shared mailbox with a password).
+2. In the **Microsoft 365 admin center** → Users → that user → **Mail** → *Manage email apps* → tick **Authenticated SMTP**. (Tenant-wide SMTP AUTH must not be disabled.)
+3. If the mailbox uses MFA, create an **app password** for it and use that as `SMTP_PASS`.
+4. In `.env`: `SMTP_HOST=smtp.office365.com`, `SMTP_PORT=587`, `SMTP_USER` and `MAIL_FROM` = that mailbox.
+5. Restart, then use **Send test email** on the dashboard.
+
+Gmail / Google Workspace: `SMTP_HOST=smtp.gmail.com`, `SMTP_PORT=587`, and an App Password.
 
 ## Going live checklist
 

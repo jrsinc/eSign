@@ -1,3 +1,8 @@
+// Settings (SMTP, password, company name) live in .env next to this file.
+try {
+  process.loadEnvFile(require('path').join(__dirname, '.env'));
+} catch {}
+
 const express = require('express');
 const multer = require('multer');
 const cookieParser = require('cookie-parser');
@@ -65,7 +70,25 @@ app.post('/api/logout', (req, res) => {
   res.clearCookie('sid');
   res.json({ ok: true });
 });
-app.get('/api/me', requireAdmin, (req, res) => res.json({ company: COMPANY, mail: mailer.enabled() }));
+app.get('/api/me', requireAdmin, (req, res) => res.json({ company: COMPANY, mail: mailer.enabled(), notify: process.env.NOTIFY_EMAIL || '' }));
+
+app.post('/api/test-email', requireAdmin, async (req, res) => {
+  if (!mailer.enabled()) return res.status(400).json({ error: 'Email is off. Add your SMTP settings to the .env file and restart.' });
+  const to = String(req.body.to || '').trim();
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(to)) return res.status(400).json({ error: 'Enter a valid email address.' });
+  try {
+    await mailer.send({ to, subject: `${COMPANY} eSign test email`, heading: 'Email is working', text: 'Your e-signature system can send email. Signers will now receive their signing links automatically.' });
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(400).json({ error: `Sending failed: ${e.message}` });
+  }
+});
+
+// Status emails to the sender, like DocuSign's "X has signed" notices.
+async function notifySender(subject, text, attachments) {
+  if (!process.env.NOTIFY_EMAIL) return;
+  await mailer.send({ to: process.env.NOTIFY_EMAIL, subject, heading: subject, text, attachments }).catch((e) => console.error('Mail error:', e.message));
+}
 
 // ---------- Admin: documents ----------
 function adminView(doc) {
@@ -167,7 +190,7 @@ async function invite(doc, signer, reminder = false) {
   const subject = `${reminder ? 'Reminder: ' : ''}Please sign "${doc.title}"`;
   const text = `Hello ${signer.name},\n\n${COMPANY} has sent you "${doc.title}" to review and sign electronically.${doc.message ? `\n\nMessage: ${doc.message}` : ''}`;
   try {
-    const sent = await mailer.send({ to: signer.email, subject, text, link: signLink(signer), linkLabel: 'Review & Sign' });
+    const sent = await mailer.send({ to: signer.email, subject, heading: `${COMPANY} sent you a document to review and sign`, text, link: signLink(signer), linkLabel: 'REVIEW DOCUMENT' });
     if (sent) log(doc, `${reminder ? 'Reminder' : 'Invitation'} emailed to ${signer.name} <${signer.email}>`);
   } catch (e) {
     console.error('Mail error:', e.message);
@@ -336,28 +359,33 @@ app.post('/api/sign/:token', async (req, res) => {
     doc.finalHash = sha256(bytes);
     fs.writeFileSync(filePath(doc.finalFile), bytes);
     store.save();
+    const attachments = [{ filename: `${doc.title.replace(/[^\w.\- ]/g, '_')} - signed.pdf`, content: bytes }];
     for (const s of doc.signers) {
       await mailer
-        .send({ to: s.email, subject: `Completed: "${doc.title}"`, text: `All parties have signed "${doc.title}". Download your copy below.`, link: `${BASE_URL}/sign.html?t=${s.token}`, linkLabel: 'Download signed copy' })
+        .send({ to: s.email, subject: `Completed: "${doc.title}"`, heading: 'Your document has been completed', text: `All parties have signed "${doc.title}". The signed copy is attached to this email.`, link: `${BASE_URL}/sign.html?t=${s.token}`, linkLabel: 'VIEW COMPLETED DOCUMENT', attachments })
         .catch((e) => console.error('Mail error:', e.message));
     }
+    await notifySender(`Completed: "${doc.title}"`, `All parties have signed "${doc.title}". The signed copy with its certificate of completion is attached.`, attachments);
   } else {
     store.save();
+    await notifySender(`${signer.name} signed "${doc.title}"`, `${signer.name} <${signer.email}> signed "${doc.title}".\nStill waiting on: ${doc.signers.filter((s) => s.status !== 'signed').map((s) => s.name).join(', ')}.`);
     if (doc.signingOrder === 'sequential') for (const s of activeSigners(doc)) await invite(doc, s);
   }
   store.save();
   res.json({ ok: true, completed: doc.status === 'completed' });
 });
 
-app.post('/api/sign/:token/decline', (req, res) => {
+app.post('/api/sign/:token/decline', async (req, res) => {
   const ctx = signerCtx(req, res);
   if (!ctx) return;
   const { doc, signer } = ctx;
   if (doc.status !== 'sent' || signer.status === 'signed') return res.status(400).json({ error: 'Cannot decline now.' });
   signer.status = 'declined';
   doc.status = 'declined';
-  log(doc, `Declined by ${signer.name} <${signer.email}>${req.body.reason ? `: ${String(req.body.reason).slice(0, 300)}` : ''}`, req);
+  const reason = req.body.reason ? String(req.body.reason).slice(0, 300) : '';
+  log(doc, `Declined by ${signer.name} <${signer.email}>${reason ? `: ${reason}` : ''}`, req);
   store.save();
+  await notifySender(`${signer.name} declined "${doc.title}"`, `${signer.name} <${signer.email}> declined to sign "${doc.title}".${reason ? `\nReason: ${reason}` : ''}`);
   res.json({ ok: true });
 });
 
