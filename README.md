@@ -1,0 +1,64 @@
+# Company eSign
+
+A self-hosted electronic signature system: upload a PDF, place signature fields, send it to signers, and get back a signed PDF with an audit certificate.
+
+## Features
+
+- **Admin dashboard** (password protected): upload PDFs; add signers; drag and drop fields (signature, initials, date signed, full name, text, checkbox); send; void; send reminders; delete
+- **Signing order**: everyone at once, or one after another
+- **Signer page**: personal secure link (no account needed); draw or type a signature; guided "next field" navigation; consent checkbox; decline option
+- **Completed PDF**: values stamped onto the pages, an envelope ID footer on every page, and an appended **Certificate of Completion** (signers, emails, IPs, devices, timestamps, consent, full event history, SHA-256 of the original)
+- **Tamper check**: `/verify.html` lets anyone upload a signed PDF to confirm it matches the stored SHA-256 fingerprint
+- **Email** via any SMTP server (optional). Without SMTP, copy each signer's link from the dashboard.
+
+## Run it
+
+Requires Node.js 18 or newer.
+
+```bash
+npm install
+```
+
+```bash
+npm start
+```
+
+Open http://localhost:3000. The default password is `admin`.
+
+## Configuration (environment variables)
+
+| Variable | Purpose | Default |
+|---|---|---|
+| `ADMIN_PASSWORD` | Dashboard password. **Set this.** | `admin` |
+| `COMPANY_NAME` | Shown in the UI, emails and certificate | `Our Company` |
+| `BASE_URL` | Public URL used in signing links, e.g. `https://sign.yourcompany.com` | `http://localhost:3000` |
+| `PORT` | HTTP port | `3000` |
+| `DATA_DIR` | Where the database and PDFs are stored | `./data` |
+| `SMTP_HOST`, `SMTP_PORT`, `SMTP_SECURE`, `SMTP_USER`, `SMTP_PASS`, `MAIL_FROM` | Outgoing email (e.g. Gmail, Microsoft 365, SendGrid SMTP) | email off |
+
+Example on Windows PowerShell:
+
+```powershell
+$env:ADMIN_PASSWORD="a-strong-password"; $env:COMPANY_NAME="Acme Ltd"; npm start
+```
+
+## Going live checklist
+
+1. Put it behind **HTTPS** (e.g. Caddy, Nginx, or IIS reverse proxy) and set `BASE_URL` to the https address.
+2. Set a strong `ADMIN_PASSWORD`.
+3. Configure SMTP so signers get emails automatically.
+4. **Back up the `data/` folder** regularly: it holds every document, signed copy and audit trail.
+
+## Legal note
+
+Signatures made this way are "simple electronic signatures", backed by an audit trail and consent record. They are legally accepted for most business contracts in many places (e.g. US ESIGN/UETA, EU eIDAS, India IT Act for many document types). Some documents need stronger signatures or wet ink, such as wills, some property transfers, or qualified/Aadhaar e-signatures in some countries. Check with your lawyer for your use cases.
+
+## Project layout
+
+```
+server.js          API + routes
+lib/store.js       JSON-file database
+lib/finalize.js    Builds the signed PDF + certificate
+lib/mailer.js      SMTP email
+public/            Dashboard (index.html, admin.js), signer page (sign.html, sign.js), verify.html
+```

@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>eSign – Dashboard</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="top">
+    <div class="logo">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 17c3-1 4-6 6-6s1 5 3 5 2-3 4-3 2 2 5 2"/><path d="M3 21h18"/></svg>
+      <span id="company">eSign</span>
+    </div>
+    <nav id="nav" class="row hidden">
+      <a class="btn ghost" href="#/">Documents</a>
+      <a class="btn ghost" href="/verify.html" target="_blank">Verify</a>
+    </nav>
+    <div class="spacer"></div>
+    <div id="docActions" class="row"></div>
+    <button id="logout" class="ghost hidden">Log out</button>
+  </header>
+
+  <main id="app"></main>
+
+  <script src="/vendor/pdfjs/pdf.min.js"></script>
+  <script src="/common.js"></script>
+  <script src="/admin.js"></script>
+</body>
+</html>

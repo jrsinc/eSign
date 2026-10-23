@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Verify a signed document</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="top"><div class="logo">Verify a signed document</div></header>
+  <main class="wrap" style="max-width:640px">
+    <div class="drop" id="drop"><strong>Drop a signed PDF here</strong> or click to choose one<input type="file" id="file" accept="application/pdf" hidden></div>
+    <p class="small muted">The file's SHA-256 fingerprint is compared with our records. Any change to the file, even one character, will fail verification.</p>
+    <div id="result"></div>
+  </main>
+  <script>
+    const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    const drop = document.getElementById('drop'), input = document.getElementById('file'), out = document.getElementById('result');
+    drop.onclick = () => input.click();
+    input.onchange = () => input.files[0] && check(input.files[0]);
+    drop.ondragover = (e) => { e.preventDefault(); drop.classList.add('over'); };
+    drop.ondragleave = () => drop.classList.remove('over');
+    drop.ondrop = (e) => { e.preventDefault(); drop.classList.remove('over'); e.dataTransfer.files[0] && check(e.dataTransfer.files[0]); };
+    async function check(file) {
+      out.innerHTML = '<p class="muted">Checking…</p>';
+      const fd = new FormData(); fd.append('file', file);
+      const r = await (await fetch('/api/verify', { method: 'POST', body: fd })).json();
+      out.innerHTML = r.valid
+        ? `<div class="card" style="border-color:var(--ok)"><h2 style="color:var(--ok)">✓ Authentic and unmodified</h2>
+            <p><strong>${esc(r.title)}</strong><br><span class="small muted">Envelope ${esc(r.id)} · completed ${new Date(r.completedAt).toLocaleString()}</span></p>
+            <ul>${r.signers.map((s) => `<li>${esc(s.name)} &lt;${esc(s.email)}&gt; signed ${new Date(s.signedAt).toLocaleString()}</li>`).join('')}</ul>
+            <p class="small muted" style="word-break:break-all">SHA-256 ${esc(r.hash)}</p></div>`
+        : `<div class="card" style="border-color:var(--danger)"><h2 style="color:var(--danger)">✗ Not verified</h2>
+            <p>This file doesn't match any document completed in this system. It may have been altered, or it wasn't signed here.</p>
+            <p class="small muted" style="word-break:break-all">SHA-256 ${esc(r.hash || '')}</p></div>`;
+    }
+  </script>
+</body>
+</html>

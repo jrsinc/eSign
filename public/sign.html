@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex">
+  <title>Review &amp; Sign</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="top">
+    <div class="logo">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 17c3-1 4-6 6-6s1 5 3 5 2-3 4-3 2 2 5 2"/><path d="M3 21h18"/></svg>
+      <span id="company">eSign</span>
+    </div>
+    <div class="spacer"></div>
+    <span id="progress" class="small muted"></span>
+  </header>
+  <div id="bar" class="sign-bar hidden">
+    <div class="grow">
+      <label><input type="checkbox" id="consent"> I agree to use electronic records and signatures, and that my electronic signature is the legal equivalent of my handwritten signature.</label>
+    </div>
+    <button id="declineBtn" class="ghost danger">Decline</button>
+    <button id="nextBtn">Next field</button>
+    <button id="finishBtn" class="primary">Finish</button>
+  </div>
+  <main id="app"><div class="wrap card">Loading…</div></main>
+
+  <div id="modal" class="modal-bg hidden">
+    <div class="modal">
+      <h2 id="modalTitle">Adopt your signature</h2>
+      <div class="tabs"><button data-tab="draw" class="active">Draw</button><button data-tab="type">Type</button></div>
+      <div data-pane="draw">
+        <canvas id="pad" class="pad"></canvas>
+        <div class="row" style="justify-content:space-between;margin-top:6px"><span class="small muted">Sign with your mouse, finger or stylus</span><button id="clearPad" class="ghost">Clear</button></div>
+      </div>
+      <div data-pane="type" class="hidden">
+        <input id="typed" placeholder="Type your name">
+        <div id="typedPreview" class="typed-preview"></div>
+      </div>
+      <p class="small muted">By selecting Adopt, I agree this mark is my electronic signature and will be used wherever I sign this document.</p>
+      <div class="row end">
+        <button id="cancelSig">Cancel</button>
+        <button id="adoptSig" class="primary">Adopt and sign</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="/vendor/pdfjs/pdf.min.js"></script>
+  <script src="/common.js"></script>
+  <script src="/sign.js"></script>
+</body>
+</html>
