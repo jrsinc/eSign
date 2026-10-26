@@ -21,7 +21,9 @@ async function load() {
   document.title = `Sign: ${info.title}`;
   const dl = info.hasFinal ? `<p><a class="btn primary" href="/api/sign/${encodeURIComponent(token)}/signed">Download signed copy</a></p>` : '';
 
-  if (info.status === 'voided') return message('Document voided', '<p class="muted">The sender cancelled this document. No action is needed.</p>');
+  if (info.status === 'voided') {
+    return message('Agreement cancelled', `<p class="muted">${esc(info.company)} cancelled agreement <strong>${esc(info.agreementId || '')}</strong> "${esc(info.title)}". No action is needed.</p>${info.cancelReason ? `<p>Reason: ${esc(info.cancelReason)}</p>` : ''}`);
+  }
   if (info.status === 'declined') return message('Document declined', '<p class="muted">This document was declined and can no longer be signed.</p>');
   if (info.signer.status === 'signed') {
     return message('You have signed ✓', info.status === 'completed'
@@ -33,6 +35,7 @@ async function load() {
   app.innerHTML = `
     <div class="wrap" style="max-width:960px">
       <div class="card" style="margin-bottom:16px">
+        ${info.agreementId ? `<div class="agr-id">Agreement ID: ${esc(info.agreementId)}</div>` : ''}
         <h1 style="margin-bottom:4px">${esc(info.title)}</h1>
         <p class="muted" style="margin:0">Hi ${esc(info.signer.name)}, please review the document and complete the highlighted fields.</p>
         ${info.message ? `<p style="white-space:pre-line;margin:10px 0 0;padding:10px;background:#f9fafb;border-radius:8px">${esc(info.message)}</p>` : ''}

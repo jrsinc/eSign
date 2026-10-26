@@ -23,6 +23,7 @@ const BASE_URL = (process.env.BASE_URL || `http://localhost:${PORT}`).replace(/\
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'admin';
 const COMPANY = mailer.COMPANY;
 const SENDER_EMAIL = process.env.NOTIFY_EMAIL || process.env.MAIL_FROM || '';
+const AGREEMENT_PREFIX = String(process.env.AGREEMENT_PREFIX || 'AGR').replace(/[^A-Za-z0-9]/g, '').slice(0, 10) || 'AGR';
 if (!process.env.ADMIN_PASSWORD) console.warn('WARNING: ADMIN_PASSWORD not set, using "admin". Set it before real use.');
 
 const app = express();
@@ -138,7 +139,8 @@ function adminView(doc) {
   const { sources, ...rest } = doc;
   return {
     ...rest,
-    signers: doc.signers.map((s) => ({ ...s, link: s.token ? signLink(s) : null })),
+    // A signer only has a link once it is their turn (see issueLinks).
+    signers: doc.signers.map(({ token, ...s }) => ({ ...s, link: token && doc.status === 'sent' ? signLink({ token }) : null })),
     fields: doc.fields.map((f) => ({ ...f, value: f.type === 'signature' || f.type === 'initials' ? (f.value ? '[signed]' : null) : f.value })),
   };
 }
@@ -146,7 +148,7 @@ function adminView(doc) {
 app.get('/api/documents', requireAdmin, (req, res) => {
   res.json(
     store.all().map((d) => ({
-      id: d.id, title: d.title, status: d.status, createdAt: d.createdAt, completedAt: d.completedAt,
+      id: d.id, agreementId: d.agreementId, title: d.title, status: d.status, createdAt: d.createdAt, completedAt: d.completedAt,
       signers: d.signers.map((s) => ({ name: s.name, email: s.email, status: s.status })),
     }))
   );
@@ -164,7 +166,7 @@ app.post('/api/documents', requireAdmin, upload.array('file', 20), async (req, r
     reminder: 'none',
     requireReason: true,
     status: 'draft',
-    signingOrder: 'parallel',
+    signingOrder: 'sequential',
     senderName: COMPANY,
     senderEmail: SENDER_EMAIL,
     createdAt: now(),
@@ -245,9 +247,11 @@ function removeFiles(doc) {
   for (const f of files) if (f && fs.existsSync(filePath(f))) fs.unlinkSync(filePath(f));
 }
 
+// Only unsent drafts can be discarded. Once sent, a document is an agreement: it can be cancelled, never deleted.
 app.delete('/api/documents/:id', requireAdmin, (req, res) => {
   const doc = store.get(req.params.id);
   if (!doc) return res.status(404).json({ error: 'Not found' });
+  if (doc.status !== 'draft') return res.status(403).json({ error: 'Agreements cannot be deleted. Cancel it instead.' });
   removeFiles(doc);
   store.remove(doc.id);
   res.json({ ok: true });
@@ -342,10 +346,23 @@ function activeSigners(doc) {
   return pending.length ? [pending.sort((a, b) => a.order - b.order)[0]] : [];
 }
 
+// Creates signing links only for the people whose turn it is. In sequential order that is one
+// person at a time, so the 2nd signer has no link until the 1st has signed.
+function issueLinks(doc) {
+  const fresh = [];
+  for (const s of activeSigners(doc)) {
+    if (s.token) continue;
+    s.token = id(24);
+    fresh.push(s);
+    log(doc, `Signing link issued to ${who(s)} (signer ${s.order} of ${doc.signers.length})`, null, 'info');
+  }
+  return fresh;
+}
+
 async function invite(doc, signer, reminder = false) {
   const base = doc.emailSubject?.trim() || `Please sign "${doc.title}"`;
-  const subject = `${reminder ? 'Reminder: ' : ''}${base}`;
-  const text = `Hello ${signer.name},\n\n${COMPANY} has sent you "${doc.title}" to review and sign electronically.${doc.message ? `\n\n${doc.message}` : ''}`;
+  const subject = `${reminder ? 'Reminder: ' : ''}${base} [${doc.agreementId}]`;
+  const text = `Hello ${signer.name},\n\n${COMPANY} has sent you "${doc.title}" to review and sign electronically.\nAgreement ID: ${doc.agreementId}${doc.message ? `\n\n${doc.message}` : ''}`;
   try {
     const sent = await mailer.send({
       to: signer.email, subject, heading: `${COMPANY} sent you a document to review and sign`, text,
@@ -375,12 +392,13 @@ app.post('/api/documents/:id/send', requireAdmin, async (req, res) => {
   for (const f of doc.fields) {
     if (f.type === 'dropdown' && !f.options.length) return res.status(400).json({ error: `Dropdown "${f.label || 'field'}" has no options yet.` });
   }
-  doc.signers.forEach((s) => (s.token = id(24)));
+  doc.agreementId = store.nextAgreementId(AGREEMENT_PREFIX);
   doc.status = 'sent';
   doc.sentAt = now();
-  if (!mailer.enabled()) log(doc, `Document sent for signature to ${doc.signers.map(who).join(', ')} (signing links shared manually)`, req, 'emailed');
+  log(doc, `Agreement ${doc.agreementId} created and sent for signature (${doc.signingOrder === 'sequential' ? 'in order' : 'all at once'}) to ${[...doc.signers].sort((a, b) => a.order - b.order).map((s) => `${s.order}. ${who(s)}`).join(', ')}`, req, 'created');
+  const first = issueLinks(doc);
   store.save();
-  for (const s of activeSigners(doc)) await invite(doc, s);
+  for (const s of first) await invite(doc, s);
   store.save();
   res.json(adminView(doc));
 });
@@ -389,20 +407,44 @@ app.post('/api/documents/:id/remind/:signerId', requireAdmin, async (req, res) =
   const doc = store.get(req.params.id);
   const signer = doc && doc.signers.find((s) => s.id === req.params.signerId);
   if (!signer || doc.status !== 'sent' || signer.status === 'signed') return res.status(400).json({ error: 'Cannot remind this signer' });
+  if (!signer.token) return res.status(400).json({ error: `It is not ${signer.name}'s turn yet. They get their link after the previous signer signs.` });
   if (!mailer.enabled()) return res.status(400).json({ error: 'Email is not configured. Copy the signing link instead.' });
   await invite(doc, signer, true);
   store.save();
   res.json({ ok: true });
 });
 
-app.post('/api/documents/:id/void', requireAdmin, (req, res) => {
+// Cancelling stops the agreement for good and tells every signer, including those who already signed.
+app.post('/api/documents/:id/void', requireAdmin, async (req, res) => {
   const doc = store.get(req.params.id);
-  if (!doc || doc.status !== 'sent') return res.status(400).json({ error: 'Only documents out for signature can be voided' });
+  if (!doc || doc.status !== 'sent') return res.status(400).json({ error: 'Only agreements out for signature can be cancelled' });
+  const reason = String(req.body.reason || '').trim().slice(0, 300);
+  if (!reason) return res.status(400).json({ error: 'Please give a reason for cancelling.' });
   doc.status = 'voided';
-  const reason = req.body.reason ? String(req.body.reason).slice(0, 300) : '';
-  log(doc, `Agreement cancelled by ${COMPANY}${reason ? `: ${reason}` : ''}`, req, 'voided');
+  doc.cancelledAt = now();
+  doc.cancelReason = reason;
+  log(doc, `Agreement ${doc.agreementId} cancelled by ${COMPANY}. Reason: ${reason}`, req, 'voided');
   store.save();
-  res.json(adminView(doc));
+
+  const notified = [];
+  for (const s of [...doc.signers].sort((a, b) => a.order - b.order)) {
+    try {
+      const sent = await mailer.send({
+        to: s.email,
+        subject: `Cancelled: "${doc.title}" [${doc.agreementId}]`,
+        heading: 'This agreement has been cancelled',
+        text: `Hello ${s.name},\n\n${COMPANY} has cancelled the agreement "${doc.title}" (Agreement ID: ${doc.agreementId}).\n\nReason: ${reason}\n\n${s.status === 'signed' ? 'Your signature on this agreement is no longer needed.' : 'You no longer need to sign it.'} No further action is required.`,
+      });
+      if (sent) notified.push(who(s));
+    } catch (e) {
+      console.error('Mail error:', e.message);
+      log(doc, `Cancellation email to ${who(s)} failed: ${e.message}`, null, 'failed');
+    }
+  }
+  if (notified.length) log(doc, `Cancellation notice emailed to ${notified.join(', ')}`, null, 'emailed');
+  await notifySender(`Cancelled: "${doc.title}" [${doc.agreementId}]`, `You cancelled agreement ${doc.agreementId} "${doc.title}".\nReason: ${reason}\n${notified.length ? `Notified: ${notified.join(', ')}` : 'Email is off, so signers were not notified by email.'}`);
+  store.save();
+  res.json({ ...adminView(doc), notified: notified.length });
 });
 
 // Automatic reminders (Adobe's "Send reminder: Every day").
@@ -474,6 +516,8 @@ app.get('/api/sign/:token', (req, res) => {
   res.json({
     company: COMPANY,
     title: doc.title,
+    agreementId: doc.agreementId,
+    cancelReason: doc.cancelReason,
     message: doc.message,
     status: doc.status,
     requireReason: doc.requireReason !== false,
@@ -602,14 +646,15 @@ app.post('/api/sign/:token', async (req, res) => {
     const attachments = [{ filename: `${doc.title.replace(/[^\w.\- ]/g, '_')} - signed.pdf`, content: bytes }];
     for (const s of doc.signers) {
       await mailer
-        .send({ to: s.email, subject: `Completed: "${doc.title}"`, heading: 'Your document has been completed', text: `All parties have signed "${doc.title}". The signed copy is attached to this email.`, link: `${BASE_URL}/sign.html?t=${s.token}`, linkLabel: 'VIEW COMPLETED DOCUMENT', attachments })
+        .send({ to: s.email, subject: `Completed: "${doc.title}" [${doc.agreementId}]`, heading: 'Your agreement has been completed', text: `All parties have signed "${doc.title}".\nAgreement ID: ${doc.agreementId}\n\nThe signed copy is attached to this email.`, link: `${BASE_URL}/sign.html?t=${s.token}`, linkLabel: 'VIEW COMPLETED DOCUMENT', attachments })
         .catch((e) => console.error('Mail error:', e.message));
     }
-    await notifySender(`Completed: "${doc.title}"`, `All parties have signed "${doc.title}". The signed copy with its audit report is attached.`, attachments);
+    await notifySender(`Completed: "${doc.title}" [${doc.agreementId}]`, `All parties have signed agreement ${doc.agreementId} "${doc.title}". The signed copy with its audit report is attached.`, attachments);
   } else {
     store.save();
-    await notifySender(`${signer.name} signed "${doc.title}"`, `${who(signer)} signed "${doc.title}".${reason ? `\nReason: ${reason}` : ''}\nStill waiting on: ${doc.signers.filter((s) => s.status !== 'signed').map((s) => s.name).join(', ')}.`);
-    if (doc.signingOrder === 'sequential') for (const s of activeSigners(doc)) await invite(doc, s);
+    const next = activeSigners(doc);
+    await notifySender(`${signer.name} signed "${doc.title}" [${doc.agreementId}]`, `${who(signer)} signed "${doc.title}" (signer ${signer.order} of ${doc.signers.length}).${reason ? `\nReason: ${reason}` : ''}\n${doc.signingOrder === 'sequential' && next.length ? `Signing link sent to next signer: ${next.map((s) => `${s.order}. ${who(s)}`).join(', ')}` : `Still waiting on: ${next.map((s) => s.name).join(', ')}`}.`);
+    for (const s of issueLinks(doc)) await invite(doc, s);
   }
   store.save();
   res.json({ ok: true, completed: doc.status === 'completed' });
@@ -625,7 +670,7 @@ app.post('/api/sign/:token/decline', async (req, res) => {
   const reason = req.body.reason ? String(req.body.reason).slice(0, 300) : '';
   log(doc, `Document declined by ${who(signer)}${reason ? `. Reason: ${reason}` : ''}`, req, 'declined');
   store.save();
-  await notifySender(`${signer.name} declined "${doc.title}"`, `${who(signer)} declined to sign "${doc.title}".${reason ? `\nReason: ${reason}` : ''}`);
+  await notifySender(`${signer.name} declined "${doc.title}" [${doc.agreementId}]`, `${who(signer)} declined to sign agreement ${doc.agreementId} "${doc.title}".${reason ? `\nReason: ${reason}` : ''}`);
   res.json({ ok: true });
 });
 
@@ -636,7 +681,7 @@ app.post('/api/verify', upload.single('file'), (req, res) => {
   const doc = store.all().find((d) => d.finalHash === hash);
   if (!doc) return res.json({ valid: false, hash });
   res.json({
-    valid: true, hash, title: doc.title, id: doc.transactionId || doc.id, completedAt: doc.completedAt,
+    valid: true, hash, title: doc.title, agreementId: doc.agreementId, id: doc.transactionId || doc.id, completedAt: doc.completedAt,
     signers: doc.signers.map((s) => ({ name: s.name, email: s.email, signedAt: s.signedAt, reason: s.reason })),
   });
 });
@@ -646,6 +691,12 @@ app.use((err, req, res, next) => {
   console.error(err);
   res.status(err.code === 'LIMIT_FILE_SIZE' ? 413 : 500).json({ error: err.code === 'LIMIT_FILE_SIZE' ? 'File too large (max 25 MB)' : 'Server error' });
 });
+
+// Agreements sent before numbering existed get their number now, oldest first.
+for (const d of [...store.all()].filter((d) => d.status !== 'draft' && !d.agreementId).sort((a, b) => (a.sentAt || a.createdAt).localeCompare(b.sentAt || b.createdAt))) {
+  d.agreementId = store.nextAgreementId(AGREEMENT_PREFIX);
+}
+store.save();
 
 app.listen(PORT, () => {
   console.log(`${COMPANY} eSign running at ${BASE_URL}  (email ${mailer.enabled() ? 'ON' : 'OFF - links print here'})`);

@@ -26,6 +26,7 @@ function formatYMD(Y, M, D, fmt) {
   switch (fmt) {
     case 'DD/MM/YYYY': return `${D}/${M}/${Y}`;
     case 'YYYY-MM-DD': return `${Y}-${M}-${D}`;
+    case 'DD-MMM-YYYY': return `${D}-${mon.toUpperCase()}-${Y}`;
     case 'DD-Mon-YYYY': return `${D}-${mon}-${Y}`;
     case 'Mon DD, YYYY': return `${mon} ${D}, ${Y}`;
     case 'DD.MM.YYYY': return `${D}.${M}.${Y}`;

@@ -78,8 +78,8 @@ async function showList() {
       </div>
       <div class="card" style="margin-top:20px;padding:0">
         <table>
-          <thead><tr><th>Document</th><th>Status</th><th>Recipients</th><th>Created</th></tr></thead>
-          <tbody id="rows"><tr><td colspan="4" class="muted">Loading…</td></tr></tbody>
+          <thead><tr><th>Agreement ID</th><th>Document</th><th>Status</th><th>Recipients</th><th>Created</th></tr></thead>
+          <tbody id="rows"><tr><td colspan="5" class="muted">Loading…</td></tr></tbody>
         </table>
       </div>
     </div>`;
@@ -112,12 +112,13 @@ async function showList() {
   $('#rows').innerHTML = docs.length
     ? docs.map((d) => `
       <tr class="click" data-id="${d.id}">
+        <td class="small" style="font-family:Consolas,monospace;white-space:nowrap">${d.agreementId ? esc(d.agreementId) : '<span class="muted">Draft</span>'}</td>
         <td><strong>${esc(d.title)}</strong></td>
-        <td><span class="badge ${d.status}">${d.status}</span></td>
-        <td class="small">${d.signers.map((s) => `${esc(s.name)} <span class="badge ${s.status}">${s.status}</span>`).join('<br>') || '<span class="muted">—</span>'}</td>
+        <td><span class="badge ${d.status}">${statusLabel(d.status)}</span></td>
+        <td class="small">${d.signers.map((s, i) => `${i + 1}. ${esc(s.name)} <span class="badge ${s.status}">${s.status}</span>`).join('<br>') || '<span class="muted">—</span>'}</td>
         <td class="small muted">${when(d.createdAt)}</td>
       </tr>`).join('')
-    : '<tr><td colspan="4" class="muted">No documents yet. Upload a PDF to get started.</td></tr>';
+    : '<tr><td colspan="5" class="muted">No documents yet. Upload a PDF to get started.</td></tr>';
   app.querySelectorAll('tr.click').forEach((tr) => (tr.onclick = () => (location.hash = `#/doc/${tr.dataset.id}`)));
 }
 
@@ -167,7 +168,7 @@ function showEditor(doc) {
   actions.innerHTML = `
     <span id="saveState" class="small muted"></span>
     <button id="pagesBtn">📄 Organize pages</button>
-    <button id="delDoc" class="ghost danger">Delete</button>
+    <button id="delDoc" class="ghost danger" title="Drafts have not been sent, so they can be discarded">Discard draft</button>
     <button id="sendBtn" class="primary">Send</button>`;
 
   app.innerHTML = `
@@ -217,8 +218,13 @@ function showEditor(doc) {
     sb.innerHTML =
       section('recipients', 'ADD RECIPIENTS', `
         <div id="signers">${doc.signers.map((s, i) => `
-          <div class="signer-row" data-id="${s.id}">
-            <span class="dot" style="background:${COLORS[i % COLORS.length]}"></span>
+          <div class="signer-row sortable" data-id="${s.id}">
+            <div class="order-col">
+              <span class="grab" title="Drag to change signing order">⋮⋮</span>
+              <span class="num" style="background:${COLORS[i % COLORS.length]}" title="Signer ${i + 1}">${i + 1}</span>
+              <button class="ghost mini" data-up ${i === 0 ? 'disabled' : ''} title="Move up">▲</button>
+              <button class="ghost mini" data-down ${i === doc.signers.length - 1 ? 'disabled' : ''} title="Move down">▼</button>
+            </div>
             <div>
               <span class="small muted">Full name</span>
               <input data-k="name" placeholder="e.g. Jane Doe" value="${esc(s.name)}">
@@ -232,7 +238,8 @@ function showEditor(doc) {
         <select id="order">
           <option value="parallel">Everyone at once</option>
           <option value="sequential">One after another (in list order)</option>
-        </select>`) +
+        </select>
+        ${doc.signers.length > 1 ? '<p class="small muted">Drag ⋮⋮ or use ▲▼ to change who signs 1st, 2nd, 3rd…</p>' : ''}`) +
       section('fields', 'ADD FIELDS', `
         <label for="activeSigner" style="margin-top:0">Fields for</label>
         <select id="activeSigner">${doc.signers.map((s, i) => `<option value="${s.id}">${i + 1}. ${esc(s.name || s.email || '(unnamed)')}</option>`).join('') || '<option value="">Add a recipient first</option>'}</select>
@@ -282,6 +289,47 @@ function showEditor(doc) {
           toast('Moved the email to the Email box. Please enter the full name.');
           $(`.signer-row[data-id="${s.id}"] input[data-k="name"]`).focus();
         } else renderSidebarSelectOnly();
+      };
+      // Reordering: drag by the ⋮⋮ handle, or use the arrow buttons.
+      const move = (to) => {
+        const from = doc.signers.indexOf(s);
+        if (to < 0 || to >= doc.signers.length || to === from) return;
+        doc.signers.splice(from, 1);
+        doc.signers.splice(to, 0, s);
+        renderSidebar();
+        renderFields();
+        scheduleSave();
+      };
+      row.querySelector('[data-up]').onclick = () => move(doc.signers.indexOf(s) - 1);
+      row.querySelector('[data-down]').onclick = () => move(doc.signers.indexOf(s) + 1);
+      row.querySelector('.grab').onpointerdown = () => (row.draggable = true);
+      row.ondragstart = (e) => {
+        e.dataTransfer.setData('text/plain', s.id);
+        e.dataTransfer.effectAllowed = 'move';
+        row.classList.add('dragging');
+      };
+      row.ondragend = () => {
+        row.draggable = false;
+        row.classList.remove('dragging');
+        sb.querySelectorAll('.signer-row').forEach((r) => r.classList.remove('drop-above', 'drop-below'));
+      };
+      row.ondragover = (e) => {
+        e.preventDefault();
+        const below = e.clientY > row.getBoundingClientRect().top + row.offsetHeight / 2;
+        row.classList.toggle('drop-below', below);
+        row.classList.toggle('drop-above', !below);
+      };
+      row.ondragleave = () => row.classList.remove('drop-above', 'drop-below');
+      row.ondrop = (e) => {
+        e.preventDefault();
+        const dragged = doc.signers.find((x) => x.id === e.dataTransfer.getData('text/plain'));
+        if (!dragged || dragged === s) return;
+        const below = row.classList.contains('drop-below');
+        doc.signers.splice(doc.signers.indexOf(dragged), 1);
+        doc.signers.splice(doc.signers.indexOf(s) + (below ? 1 : 0), 0, dragged);
+        renderSidebar();
+        renderFields();
+        scheduleSave();
       };
       row.querySelector('[data-rm]').onclick = () => {
         doc.signers = doc.signers.filter((x) => x.id !== s.id);
@@ -508,7 +556,7 @@ function showEditor(doc) {
   };
 
   $('#delDoc').onclick = async () => {
-    if (!confirm('Delete this draft permanently?')) return;
+    if (!confirm('Discard this unsent draft? (Sent agreements can never be deleted, only cancelled.)')) return;
     await api(`/api/documents/${doc.id}`, { method: 'DELETE' });
     location.hash = '#/';
   };
@@ -516,8 +564,11 @@ function showEditor(doc) {
   $('#sendBtn').onclick = async () => {
     try {
       await save();
-      const list = doc.signers.map((s) => `• ${s.name} <${s.email}>`).join('\n');
-      if (!confirm(`Send "${doc.title}" for signature to:\n${list}\n\nThe document can't be edited after sending.`)) return;
+      const list = doc.signers.map((s, i) => `${i + 1}. ${s.name} <${s.email}>`).join('\n');
+      const how = doc.signingOrder === 'sequential' && doc.signers.length > 1
+        ? 'Signer 1 gets the link now. Each next signer gets theirs only after the previous one signs.'
+        : 'Everyone gets their link now.';
+      if (!confirm(`Send "${doc.title}" for signature?\n\n${list}\n\n${how}\n\nThis creates an agreement with its own ID. It can't be edited or deleted after sending, only cancelled.`)) return;
       const sent = await api(`/api/documents/${doc.id}/send`, { method: 'POST' });
       toast(me.mail ? 'Sent! Invitations emailed.' : 'Sent! Copy each signer\'s link to share it.');
       showDetail(sent);
@@ -678,38 +729,82 @@ async function showOrganizer(doc) {
   render();
 }
 
+const statusLabel = (s) => ({ voided: 'cancelled', sent: 'out for signature' }[s] || s);
+
+function cancelAgreement(doc) {
+  const bg = document.createElement('div');
+  bg.className = 'modal-bg';
+  bg.innerHTML = `
+    <div class="modal">
+      <h2>Cancel agreement ${esc(doc.agreementId || '')}?</h2>
+      <p class="muted">"${esc(doc.title)}" will be cancelled for good. Nobody will be able to sign it, and it stays in your records with its full audit trail.</p>
+      <p class="small"><strong>Everyone below will get a cancellation email:</strong><br>${doc.signers.map((s) => `${s.order}. ${esc(s.name)} &lt;${esc(s.email)}&gt;`).join('<br>')}</p>
+      ${me.mail ? '' : '<p class="small" style="color:var(--warn)">Email is off, so signers will not be emailed.</p>'}
+      <label for="cancelReason">Reason for cancelling *</label>
+      <textarea id="cancelReason" rows="3" maxlength="300" placeholder="e.g. Wrong version of the form was sent"></textarea>
+      <div class="row end" style="margin-top:14px">
+        <button id="cancelNo">Keep agreement</button>
+        <button id="cancelYes" class="primary" style="background:var(--danger);border-color:var(--danger)">Cancel agreement</button>
+      </div>
+    </div>`;
+  document.body.append(bg);
+  $('#cancelReason').focus();
+  $('#cancelNo').onclick = () => bg.remove();
+  $('#cancelYes').onclick = async () => {
+    const reason = $('#cancelReason').value.trim();
+    if (!reason) return toast('Please enter a reason');
+    $('#cancelYes').disabled = true;
+    try {
+      const updated = await api(`/api/documents/${doc.id}/void`, { method: 'POST', body: { reason } });
+      bg.remove();
+      toast(updated.notified ? `Agreement cancelled. ${updated.notified} signer${updated.notified > 1 ? 's' : ''} notified by email.` : 'Agreement cancelled.', 4000);
+      showDetail(updated);
+    } catch (e) {
+      toast(e.message, 4000);
+      $('#cancelYes').disabled = false;
+    }
+  };
+}
+
 // ---------------- Sent / completed view ----------------
 function showDetail(doc) {
   document.onkeydown = null;
   location.hash = `#/doc/${doc.id}`;
   const done = doc.status === 'completed';
+  // Agreements are never deleted; while out for signature they can only be cancelled.
   actions.innerHTML = `
     ${done ? `<a class="btn primary" href="/api/documents/${doc.id}/signed">Download signed PDF</a>` : ''}
-    ${doc.status === 'sent' ? '<button id="voidBtn" class="danger">Cancel agreement</button>' : ''}
-    <button id="delDoc" class="ghost danger">Delete</button>`;
+    ${doc.status === 'sent' ? '<button id="voidBtn" class="danger">Cancel agreement</button>' : ''}`;
+  const sequential = doc.signingOrder === 'sequential';
+  const current = doc.signers.filter((s) => s.link).map((s) => s.order);
 
   app.innerHTML = `
     <div class="editor">
       <aside class="sidebar">
         <section>
+          <div class="agr-id">${esc(doc.agreementId || '')}</div>
           <h2>${esc(doc.title)}</h2>
-          <span class="badge ${doc.status}">${doc.status}</span>
+          <span class="badge ${doc.status}">${statusLabel(doc.status)}</span>
           <p class="small muted" style="margin:10px 0 0">Transaction ID: ${esc(doc.transactionId || doc.id)}<br>Sent ${when(doc.sentAt)}${done ? `<br>Completed ${when(doc.completedAt)}` : ''}
+          ${doc.status === 'voided' ? `<br>Cancelled ${when(doc.cancelledAt)}${doc.cancelReason ? `<br>Reason: ${esc(doc.cancelReason)}` : ''}` : ''}
           ${doc.status === 'sent' ? `<br>Reminders: ${REMINDER_LABELS[doc.reminder || 'none']}` : ''}</p>
           ${done ? `<p class="small muted" style="word-break:break-all">Signed file SHA-256:<br>${doc.finalHash}</p>` : ''}
         </section>
         <section>
           <h3>Recipients${doc.signingOrder === 'sequential' ? ' (in order)' : ''}</h3>
-          ${doc.signers.map((s) => `
-            <div class="signer-row" style="grid-template-columns:12px 1fr">
-              <span class="dot" style="background:${s.color}"></span>
+          ${[...doc.signers].sort((a, b) => a.order - b.order).map((s) => `
+            <div class="signer-row" style="grid-template-columns:auto 1fr">
+              <span class="num" style="background:${s.color}" title="Signer ${s.order}">${s.order}</span>
               <div>
                 <strong>${esc(s.name)}</strong> <span class="badge ${s.status}">${s.status}</span><br>
                 <span class="small muted">${esc(s.email)}</span>
                 ${s.signedAt ? `<div class="small muted">Signed ${when(s.signedAt)} · IP ${esc(s.ip)}${s.reason ? `<br>Reason: ${esc(s.reason)}` : ''}</div>` : ''}
-                ${doc.status === 'sent' && s.status !== 'signed' ? `
+                ${doc.status === 'sent' && s.status !== 'signed' && s.link ? `
+                  <div class="small" style="color:var(--ok);margin-top:4px">● ${sequential ? 'Their turn to sign now' : 'Can sign now'}</div>
                   <div class="linkbox"><input readonly value="${esc(s.link)}"><button data-copy="${esc(s.link)}">Copy</button></div>
                   ${me.mail ? `<button class="ghost small" data-remind="${s.id}" style="padding:4px 0">Send reminder</button>` : ''}` : ''}
+                ${doc.status === 'sent' && s.status !== 'signed' && !s.link ? `
+                  <div class="small muted" style="margin-top:4px">🔒 Waiting for signer ${current.join(', ')}. Their link is sent automatically after that.</div>` : ''}
               </div>
             </div>`).join('')}
         </section>
@@ -731,16 +826,7 @@ function showDetail(doc) {
       toast('Reminder sent');
     } catch (e) { toast(e.message); }
   }));
-  $('#voidBtn') && ($('#voidBtn').onclick = async () => {
-    const reason = prompt('Cancel this agreement? Recipients will no longer be able to sign.\nReason (optional):');
-    if (reason === null) return;
-    showDetail(await api(`/api/documents/${doc.id}/void`, { method: 'POST', body: { reason } }));
-  });
-  $('#delDoc').onclick = async () => {
-    if (!confirm('Delete this document and its audit trail permanently?')) return;
-    await api(`/api/documents/${doc.id}`, { method: 'DELETE' });
-    location.hash = '#/';
-  };
+  $('#voidBtn') && ($('#voidBtn').onclick = () => cancelAgreement(doc));
 
   renderPdf(done ? `/api/documents/${doc.id}/signed` : `/api/documents/${doc.id}/original`, $('#pages')).then((pages) => {
     if (done) return;

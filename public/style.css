@@ -124,6 +124,18 @@ label.check input { width: auto; }
 .ftype-radio { border-radius: 50%; }
 .ftype-checkbox, .ftype-radio { font-size: 10px; }
 
+.agr-id { font-family: Consolas, monospace; font-size: 12px; font-weight: 700; color: var(--brand); letter-spacing: .03em; margin-bottom: 4px; }
+
+/* Numbered, draggable recipients */
+.signer-row.sortable { grid-template-columns: auto 1fr auto; }
+.order-col { display: flex; flex-direction: column; align-items: center; gap: 2px; padding-top: 4px; }
+.order-col .grab { cursor: grab; color: #9ca3af; font-size: 12px; letter-spacing: -2px; user-select: none; touch-action: none; }
+.num { display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; border-radius: 50%; color: #fff; font-size: 12px; font-weight: 700; }
+button.mini { padding: 0 4px; font-size: 9px; line-height: 1.4; color: #6b7280; }
+.signer-row.dragging { opacity: .4; }
+.signer-row.drop-above { box-shadow: 0 -3px 0 var(--brand); }
+.signer-row.drop-below { box-shadow: 0 3px 0 var(--brand); }
+
 /* Organize pages */
 .thumbs { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 16px; }
 .thumb { background: #fff; border: 1px solid var(--line); border-radius: 10px; padding: 10px; cursor: grab; }
