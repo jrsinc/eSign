@@ -29,7 +29,11 @@
   <div id="modal" class="modal-bg hidden">
     <div class="modal">
       <h2 id="modalTitle">Adopt your signature</h2>
-      <div class="tabs"><button data-tab="draw" class="active">Draw</button><button data-tab="type">Type</button></div>
+      <div class="tabs"><button data-tab="saved" class="hidden">Saved</button><button data-tab="draw" class="active">Draw</button><button data-tab="type">Type</button></div>
+      <div data-pane="saved" class="hidden">
+        <p class="small muted" style="margin:0 0 8px">You used this before. Check it is yours, then use it, or switch to Draw or Type to make a new one.</p>
+        <div class="typed-preview" style="font-size:16px"><img id="savedImg" alt="Saved signature" style="max-height:100px;max-width:100%"></div>
+      </div>
       <div data-pane="draw">
         <canvas id="pad" class="pad"></canvas>
         <div class="row" style="justify-content:space-between;margin-top:6px"><span class="small muted">Sign with your mouse, finger or stylus</span><button id="clearPad" class="ghost">Clear</button></div>
@@ -48,10 +52,19 @@
 
   <div id="reasonModal" class="modal-bg hidden">
     <div class="modal">
-      <h2>Reason for signing</h2>
-      <p class="small muted">Select why you are signing this document. It is recorded in the audit report.</p>
-      <div class="reasons" id="reasonList"></div>
-      <input id="reasonOther" class="hidden" placeholder="Type your reason" maxlength="300">
+      <h2>Confirm and sign</h2>
+      <p class="small muted" id="confirmHint">These details appear with your signature on the signature page.</p>
+      <div id="detailInputs">
+        <label for="sgTitle">Your title</label>
+        <input id="sgTitle" maxlength="120" placeholder="e.g. QA - CTS">
+        <label for="sgCompany">Company</label>
+        <input id="sgCompany" maxlength="120" placeholder="e.g. Jupiter Research Services Inc">
+      </div>
+      <div id="reasonBox">
+        <label>Reason for signing *</label>
+        <div class="reasons" id="reasonList"></div>
+        <input id="reasonOther" class="hidden" placeholder="Type your reason" maxlength="300">
+      </div>
       <div class="row end" style="margin-top:16px">
         <button id="reasonCancel">Cancel</button>
         <button id="reasonOk" class="primary">Sign document</button>

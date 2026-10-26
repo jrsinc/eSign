@@ -11,6 +11,15 @@ function message(title, body) {
   app.innerHTML = `<div class="center-box card" style="max-width:520px;text-align:center"><h1>${title}</h1>${body}</div>`;
 }
 
+function alreadySigned() {
+  const done = info.status === 'completed';
+  message('Already signed ✓', `
+    <p>You signed ${info.agreementId ? `agreement <strong>${esc(info.agreementId)}</strong>` : ''} "${esc(info.title)}"${info.signer.signedAt ? ` on ${esc(new Date(info.signer.signedAt).toLocaleString())}` : ''}.</p>
+    <p class="muted">This signing link is no longer valid. ${done
+      ? 'All parties have signed. The completed agreement was emailed to you as a PDF attachment.'
+      : 'The completed agreement will be emailed to you as a PDF attachment once everyone has signed.'}</p>`);
+}
+
 async function load() {
   try {
     info = await api(`/api/sign/${encodeURIComponent(token)}`);
@@ -19,17 +28,13 @@ async function load() {
   }
   $('#company').textContent = info.company;
   document.title = `Sign: ${info.title}`;
-  const dl = info.hasFinal ? `<p><a class="btn primary" href="/api/sign/${encodeURIComponent(token)}/signed">Download signed copy</a></p>` : '';
 
+  // Links stop working once their owner has signed.
+  if (info.expired) return alreadySigned();
   if (info.status === 'voided') {
     return message('Agreement cancelled', `<p class="muted">${esc(info.company)} cancelled agreement <strong>${esc(info.agreementId || '')}</strong> "${esc(info.title)}". No action is needed.</p>${info.cancelReason ? `<p>Reason: ${esc(info.cancelReason)}</p>` : ''}`);
   }
   if (info.status === 'declined') return message('Document declined', '<p class="muted">This document was declined and can no longer be signed.</p>');
-  if (info.signer.status === 'signed') {
-    return message('You have signed ✓', info.status === 'completed'
-      ? `<p class="muted">All parties have signed <strong>${esc(info.title)}</strong>.</p>${dl}`
-      : '<p class="muted">Thank you. We\'ll email you the completed copy once everyone has signed.</p>');
-  }
   if (info.waitingOn.length) return message('Not your turn yet', `<p class="muted">This document is waiting for ${esc(info.waitingOn.join(', '))} to sign first. You'll get an email when it's your turn.</p>`);
 
   app.innerHTML = `
@@ -126,6 +131,18 @@ async function load() {
     pages[f.page]?.layer.append(el);
     return { f, el };
   });
+  // Details this person entered on an earlier agreement are filled in; they only need to check them.
+  for (const type of ['title', 'company']) {
+    const known = info.profile?.[type];
+    if (!known) continue;
+    for (const { f, el } of fieldEls) {
+      if (f.type !== type) continue;
+      values[f.id] = known;
+      el.querySelector('input').value = known;
+      el.classList.add('done');
+      el.title = 'Filled from your previous agreement. Please check it.';
+    }
+  }
   // Radio groups that need no answer start out complete.
   for (const { f, el } of fieldEls) {
     if (f.type !== 'radio') continue;
@@ -227,21 +244,29 @@ $('#clearPad').onclick = resetPad;
 const SCRIPT_FONT = '"Segoe Script", "Brush Script MT", "Lucida Handwriting", cursive';
 $('#typed').oninput = () => ($('#typedPreview').textContent = $('#typed').value);
 
-document.querySelectorAll('.tabs button').forEach((b) => (b.onclick = () => {
-  mode = b.dataset.tab;
-  document.querySelectorAll('.tabs button').forEach((x) => x.classList.toggle('active', x === b));
-  document.querySelectorAll('[data-pane]').forEach((p) => p.classList.toggle('hidden', p.dataset.pane !== mode));
-  if (mode === 'type') $('#typed').focus();
-}));
+function showTab(tab) {
+  mode = tab;
+  document.querySelectorAll('.tabs button').forEach((x) => x.classList.toggle('active', x.dataset.tab === tab));
+  document.querySelectorAll('[data-pane]').forEach((p) => p.classList.toggle('hidden', p.dataset.pane !== tab));
+  if (tab === 'type') $('#typed').focus();
+}
+document.querySelectorAll('.tabs button').forEach((b) => (b.onclick = () => showTab(b.dataset.tab)));
 
 function openPad(type) {
   padType = type;
-  $('#modalTitle').textContent = type === 'signature' ? 'Adopt your signature' : 'Adopt your initials';
+  const saved = info.profile?.[type];
+  $('#modalTitle').textContent = saved
+    ? (type === 'signature' ? 'Verify your signature' : 'Verify your initials')
+    : (type === 'signature' ? 'Adopt your signature' : 'Adopt your initials');
+  $('#adoptSig').textContent = saved ? `Use this ${type === 'signature' ? 'signature' : 'initials'}` : 'Adopt and sign';
   const name = info.signer.name;
   $('#typed').value = type === 'signature' ? name : name.split(/\s+/).map((w) => w[0]).join('').toUpperCase();
   $('#typedPreview').textContent = $('#typed').value;
+  $('.tabs [data-tab=saved]').classList.toggle('hidden', !saved);
+  if (saved) $('#savedImg').src = saved;
   $('#modal').classList.remove('hidden');
   resetPad();
+  showTab(saved ? 'saved' : 'draw');
 }
 $('#cancelSig').onclick = () => $('#modal').classList.add('hidden');
 
@@ -272,7 +297,9 @@ function trimmed(canvas) {
 
 $('#adoptSig').onclick = () => {
   let url;
-  if (mode === 'draw') {
+  if (mode === 'saved') {
+    url = info.profile[padType];
+  } else if (mode === 'draw') {
     if (!inked) return toast('Please draw your signature');
     url = trimmed(pad);
   } else {
@@ -290,7 +317,7 @@ $('#adoptSig').onclick = () => {
   }
   if (!url) return toast('Signature is empty');
   adopted[padType] = url;
-  if (padType === 'signature') appearance = mode === 'draw' ? 'DRAW' : 'TYPE';
+  if (padType === 'signature') appearance = mode === 'saved' ? (info.profile.appearance || 'DRAW') : mode === 'draw' ? 'DRAW' : 'TYPE';
   applySig(padType);
   $('#modal').classList.add('hidden');
 };
@@ -306,12 +333,33 @@ $('#finishBtn').onclick = async () => {
     toast('Please tick the consent box to sign electronically');
     return $('#consent').focus();
   }
-  if (info.requireReason) return askReason();
-  submit('');
+  confirmAndSign();
 };
 
-// Ask why the signer is signing; the answer goes into the audit report.
-function askReason() {
+// Final step: title and company for the signature page, plus the reason for signing.
+function confirmAndSign() {
+  // Each detail is asked once: a Title/Company field on the document is shown read-only for checking;
+  // otherwise the box is pre-filled from this person's previous agreement, ready to verify.
+  const fromField = (type) => fieldEls.find((o) => o.f.type === type);
+  let prefilled = false;
+  for (const [type, input] of [['title', $('#sgTitle')], ['company', $('#sgCompany')]]) {
+    const field = fromField(type);
+    const note = input.nextElementSibling?.classList.contains('verify-note') ? input.nextElementSibling : null;
+    note?.remove();
+    input.readOnly = !!field;
+    input.classList.toggle('verified', !!field);
+    if (field) {
+      input.value = values[field.f.id] || '';
+      input.insertAdjacentHTML('afterend', '<div class="verify-note small muted">✓ As entered in the document</div>');
+    } else if (!input.value && info.profile?.[type]) {
+      input.value = info.profile[type];
+      prefilled = true;
+    }
+  }
+  $('#confirmHint').textContent = prefilled || fromField('title') || fromField('company')
+    ? 'Please check your details. They appear with your signature on the signature page.'
+    : 'These details appear with your signature on the signature page.';
+  $('#reasonBox').classList.toggle('hidden', !info.requireReason);
   $('#reasonList').innerHTML = [...info.reasons, 'Other'].map((r, i) =>
     `<label><input type="radio" name="reason" value="${esc(r)}" ${i === 0 ? 'checked' : ''}> ${esc(r === 'Other' ? 'Other (type your own)' : r)}</label>`).join('');
   const other = $('#reasonOther');
@@ -319,25 +367,33 @@ function askReason() {
   other.classList.add('hidden');
   $('#reasonList').onchange = () => other.classList.toggle('hidden', $('input[name=reason]:checked').value !== 'Other');
   $('#reasonModal').classList.remove('hidden');
+  if (!$('#sgTitle').classList.contains('hidden')) $('#sgTitle').focus();
 }
 $('#reasonCancel').onclick = () => $('#reasonModal').classList.add('hidden');
 $('#reasonOk').onclick = () => {
-  const picked = $('input[name=reason]:checked').value;
-  const reason = picked === 'Other' ? $('#reasonOther').value.trim() : picked;
-  if (!reason) return toast('Please type your reason');
+  let reason = '';
+  if (info.requireReason) {
+    const picked = $('input[name=reason]:checked').value;
+    reason = picked === 'Other' ? $('#reasonOther').value.trim() : picked;
+    if (!reason) return toast('Please type your reason');
+  }
   $('#reasonModal').classList.add('hidden');
-  submit(reason);
+  submit(reason, $('#sgTitle').value.trim(), $('#sgCompany').value.trim());
 };
 
-async function submit(reason) {
+async function submit(reason, title, company) {
   $('#finishBtn').disabled = true;
   $('#finishBtn').textContent = 'Signing…';
   try {
     const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
-    const r = await api(`/api/sign/${encodeURIComponent(token)}`, { method: 'POST', body: { consent: true, values, reason, tz, appearance } });
+    const r = await api(`/api/sign/${encodeURIComponent(token)}`, { method: 'POST', body: { consent: true, values, reason, title, company, tz, appearance } });
     window.scrollTo(0, 0);
-    if (r.completed) load();
-    else message('You have signed ✓', '<p class="muted">Thank you. We\'ll email you the completed copy once everyone has signed.</p>');
+    message('Signed successfully ✓', `
+      <p>Thank you, ${esc(info.signer.name)}. Your signature on ${info.agreementId ? `agreement <strong>${esc(info.agreementId)}</strong>` : 'this agreement'} has been recorded.</p>
+      <p class="muted">${r.completed
+        ? 'All parties have signed. The completed agreement has been emailed to you as a PDF attachment.'
+        : 'The completed agreement will be emailed to you as a PDF attachment once everyone has signed.'}
+      This signing link is no longer valid.</p>`);
   } catch (e) {
     toast(e.message, 4000);
     $('#finishBtn').disabled = false;

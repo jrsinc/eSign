@@ -194,7 +194,7 @@ function showEditor(doc) {
         method: 'PUT',
         body: {
           title: doc.title, message: doc.message, emailSubject: doc.emailSubject, signingOrder: doc.signingOrder,
-          reminder: doc.reminder, requireReason: doc.requireReason !== false, signers: doc.signers, fields: doc.fields,
+          reminder: doc.reminder, requireReason: doc.requireReason !== false, stampPage: doc.stampPage !== false, signers: doc.signers, fields: doc.fields,
         },
       });
       $('#saveState').textContent = 'All changes saved';
@@ -258,7 +258,9 @@ function showEditor(doc) {
         <select id="reminder">${Object.entries(REMINDER_LABELS).map(([k, v]) => `<option value="${k}">${v}</option>`).join('')}</select>`) +
       section('settings', 'SETTINGS', `
         <label class="check"><input type="checkbox" id="reqReason"> Ask signers for a reason when they sign</label>
-        <p class="small muted">The reason is recorded in the audit report.</p>`);
+        <p class="small muted">The reason appears under each signature and in the audit report.</p>
+        <label class="check"><input type="checkbox" id="stampPage"> Add a signature page for every signer</label>
+        <p class="small muted">After the document: each signer's signature, email, title and company.</p>`);
 
     sb.querySelectorAll('[data-acc]').forEach((b) => (b.onclick = () => { open[b.dataset.acc] = !open[b.dataset.acc]; renderSidebar(); }));
     $('#order').value = doc.signingOrder;
@@ -267,6 +269,8 @@ function showEditor(doc) {
     $('#reminder').onchange = (e) => { doc.reminder = e.target.value; scheduleSave(); };
     $('#reqReason').checked = doc.requireReason !== false;
     $('#reqReason').onchange = (e) => { doc.requireReason = e.target.checked; scheduleSave(); };
+    $('#stampPage').checked = doc.stampPage !== false;
+    $('#stampPage').onchange = (e) => { doc.stampPage = e.target.checked; scheduleSave(); };
     $('#title').oninput = (e) => { doc.title = e.target.value; scheduleSave(); };
     $('#subject').oninput = (e) => { doc.emailSubject = e.target.value; scheduleSave(); };
     $('#msg').oninput = (e) => { doc.message = e.target.value; scheduleSave(); };
@@ -798,7 +802,7 @@ function showDetail(doc) {
               <div>
                 <strong>${esc(s.name)}</strong> <span class="badge ${s.status}">${s.status}</span><br>
                 <span class="small muted">${esc(s.email)}</span>
-                ${s.signedAt ? `<div class="small muted">Signed ${when(s.signedAt)} · IP ${esc(s.ip)}${s.reason ? `<br>Reason: ${esc(s.reason)}` : ''}</div>` : ''}
+                ${s.signedAt ? `<div class="small muted">Signed ${when(s.signedAt)} · IP ${esc(s.ip)}${s.title || s.company ? `<br>${esc([s.title, s.company].filter(Boolean).join(', '))}` : ''}${s.reason ? `<br>Reason: ${esc(s.reason)}` : ''}</div>` : ''}
                 ${doc.status === 'sent' && s.status !== 'signed' && s.link ? `
                   <div class="small" style="color:var(--ok);margin-top:4px">● ${sequential ? 'Their turn to sign now' : 'Can sign now'}</div>
                   <div class="linkbox"><input readonly value="${esc(s.link)}"><button data-copy="${esc(s.link)}">Copy</button></div>

@@ -3,7 +3,7 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = '/vendor/pdfjs/pdf.worker.min.js';
 
 // Field catalog: label, icon and default size in PDF points.
 const FIELD_TYPES = {
-  signature: { label: 'E-signature', icon: '✍', size: [170, 42] },
+  signature: { label: 'E-signature', icon: '✍', size: [180, 52] },
   initials: { label: 'Initials', icon: 'IN', size: [70, 36] },
   text: { label: 'Text', icon: 'T', size: [150, 22] },
   date: { label: 'Date of signing', icon: '📅', size: [110, 22] },

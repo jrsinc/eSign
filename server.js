@@ -165,6 +165,7 @@ app.post('/api/documents', requireAdmin, upload.array('file', 20), async (req, r
     message: '',
     reminder: 'none',
     requireReason: true,
+    stampPage: true,
     status: 'draft',
     signingOrder: 'sequential',
     senderName: COMPANY,
@@ -217,7 +218,8 @@ app.put('/api/documents/:id', requireAdmin, (req, res) => {
   const doc = store.get(req.params.id);
   if (!doc) return res.status(404).json({ error: 'Not found' });
   if (doc.status !== 'draft') return res.status(400).json({ error: 'Only drafts can be edited' });
-  const { title, message, emailSubject, signingOrder, reminder, requireReason, signers, fields } = req.body;
+  const { title, message, emailSubject, signingOrder, reminder, requireReason, stampPage, signers, fields } = req.body;
+  if (typeof stampPage === 'boolean') doc.stampPage = stampPage;
   if (typeof title === 'string' && title.trim()) doc.title = title.trim().slice(0, 200);
   if (typeof message === 'string') doc.message = message.slice(0, 2000);
   if (typeof emailSubject === 'string') doc.emailSubject = emailSubject.slice(0, 200);
@@ -501,10 +503,18 @@ function signerCtx(req, res) {
   return found;
 }
 
+// A signing link works only until its owner signs. After that it just says "already signed";
+// the signed copy reaches them as an email attachment instead.
 app.get('/api/sign/:token', (req, res) => {
   const ctx = signerCtx(req, res);
   if (!ctx) return;
   const { doc, signer } = ctx;
+  if (signer.status === 'signed') {
+    return res.json({
+      company: COMPANY, title: doc.title, agreementId: doc.agreementId, status: doc.status, expired: true,
+      signer: { name: signer.name, status: 'signed', signedAt: signer.signedAt },
+    });
+  }
   const waitingOn = doc.status === 'sent' && !activeSigners(doc).includes(signer) && signer.status !== 'signed'
     ? activeSigners(doc).map((s) => s.name) : [];
   if (doc.status === 'sent' && signer.status === 'pending' && !waitingOn.length) {
@@ -527,21 +537,25 @@ app.get('/api/sign/:token', (req, res) => {
     fields: doc.fields
       .filter((f) => f.signerId === signer.id)
       .map(({ value, signerId, ...f }) => f),
-    hasFinal: !!doc.finalFile,
+    // Only while it is their turn, so a saved signature is never shown before they may sign.
+    profile: waitingOn.length || doc.status !== 'sent' ? null : publicProfile(store.getProfile(signer.email)),
   });
 });
 
+function publicProfile(p) {
+  if (!p) return null;
+  const { title, company, signature, initials, appearance, updatedAt } = p;
+  return { title, company, signature, initials, appearance, updatedAt };
+}
+
+// The document itself is only shown while it is this signer's turn.
 app.get('/api/sign/:token/file', (req, res) => {
   const ctx = signerCtx(req, res);
   if (!ctx) return;
-  sendPdf(res, ctx.doc.originalFile, `${ctx.doc.title}.pdf`, true);
-});
-
-app.get('/api/sign/:token/signed', (req, res) => {
-  const ctx = signerCtx(req, res);
-  if (!ctx) return;
-  if (!ctx.doc.finalFile) return res.status(404).json({ error: 'Not completed yet' });
-  sendPdf(res, ctx.doc.finalFile, `${ctx.doc.title} - signed.pdf`, false);
+  const { doc, signer } = ctx;
+  if (signer.status === 'signed') return res.status(410).json({ error: 'You have already signed. This link is no longer valid.' });
+  if (doc.status !== 'sent' || !activeSigners(doc).includes(signer)) return res.status(403).json({ error: 'This document is not available.' });
+  sendPdf(res, doc.originalFile, `${doc.title}.pdf`, true);
 });
 
 const isPng = (v) => typeof v === 'string' && /^data:image\/png;base64,[A-Za-z0-9+/=]+$/.test(v) && v.length < 700000;
@@ -627,9 +641,20 @@ app.post('/api/sign/:token', async (req, res) => {
 
   for (const f of doc.fields) if (f.id in values && f.signerId === signer.id) f.value = values[f.id];
   const appearance = req.body.appearance === 'TYPE' ? 'TYPE' : 'DRAW';
+  // Title and company for the signature stamp page; a Title/Company field on the document wins.
+  const fieldValue = (type) => doc.fields.find((f) => f.signerId === signer.id && f.type === type && f.value)?.value;
+  const title = String(fieldValue('title') || req.body.title || '').trim().slice(0, 120);
+  const companyName = String(fieldValue('company') || req.body.company || '').trim().slice(0, 120);
   Object.assign(signer, {
+    title, company: companyName,
     status: 'signed', signedAt: signedAt.toISOString(), consentAt: signedAt.toISOString(), tz, reason, appearance,
     ip: clientIp(req), userAgent: String(req.headers['user-agent'] || '').slice(0, 300),
+  });
+  const sigValue = (type) => doc.fields.find((f) => f.signerId === signer.id && f.type === type && f.value)?.value;
+  store.saveProfile(signer.email, {
+    name: signer.name, appearance,
+    ...(title ? { title } : {}), ...(companyName ? { company: companyName } : {}),
+    ...(sigValue('signature') ? { signature: sigValue('signature') } : {}), ...(sigValue('initials') ? { initials: sigValue('initials') } : {}),
   });
   log(doc, `Document e-signed by ${who(signer)}`, req, 'signed',
     `Signature Date: ${auditStamp(signer.signedAt)} - Time Source: server- IP address: ${signer.ip} - Signature Appearance Selected: ${appearance}${reason ? ` - Reason: ${reason}` : ''}`);
@@ -646,7 +671,7 @@ app.post('/api/sign/:token', async (req, res) => {
     const attachments = [{ filename: `${doc.title.replace(/[^\w.\- ]/g, '_')} - signed.pdf`, content: bytes }];
     for (const s of doc.signers) {
       await mailer
-        .send({ to: s.email, subject: `Completed: "${doc.title}" [${doc.agreementId}]`, heading: 'Your agreement has been completed', text: `All parties have signed "${doc.title}".\nAgreement ID: ${doc.agreementId}\n\nThe signed copy is attached to this email.`, link: `${BASE_URL}/sign.html?t=${s.token}`, linkLabel: 'VIEW COMPLETED DOCUMENT', attachments })
+        .send({ to: s.email, subject: `Completed: "${doc.title}" [${doc.agreementId}]`, heading: 'Your agreement has been completed', text: `All parties have signed "${doc.title}".\nAgreement ID: ${doc.agreementId}\n\nThe signed copy is attached to this email. Please keep it for your records.`, attachments })
         .catch((e) => console.error('Mail error:', e.message));
     }
     await notifySender(`Completed: "${doc.title}" [${doc.agreementId}]`, `All parties have signed agreement ${doc.agreementId} "${doc.title}". The signed copy with its audit report is attached.`, attachments);
