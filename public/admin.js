@@ -14,6 +14,8 @@ async function boot() {
     $('#nav').classList.remove('hidden');
     $('#logout').classList.remove('hidden');
     route();
+    watchAgreements();
+    setInterval(watchAgreements, 30000);
   } catch (e) {
     if (e.status === 401) showLogin();
     else app.innerHTML = `<div class="wrap card">${esc(e.message)}</div>`;
@@ -79,6 +81,45 @@ async function showSystemLog() {
     </div>`;
 }
 
+// ---------------- Desktop notifications ----------------
+// While the dashboard is open, shows a desktop notification when someone signs or declines, or an
+// agreement is completed. Works in the browser, the installed app and the desktop app.
+let lastSnapshot = null;
+async function watchAgreements() {
+  if (!('Notification' in window)) return;
+  let docs;
+  try {
+    docs = await api('/api/documents');
+  } catch {
+    return;
+  }
+  const snap = Object.fromEntries(docs.map((d) => [d.id, d]));
+  if (lastSnapshot && Notification.permission === 'granted') {
+    for (const d of docs) {
+      const old = lastSnapshot[d.id];
+      if (!old) continue;
+      const label = d.agreementId ? ` (${d.agreementId})` : '';
+      d.signers.forEach((s, i) => {
+        const was = old.signers[i]?.status;
+        if (s.status !== was && (s.status === 'signed' || s.status === 'declined')) {
+          notify(d.id, `${s.name} ${s.status} "${d.title}"`, s.status === 'signed' ? `Signer ${i + 1} of ${d.signers.length}${label}` : `The agreement can no longer be signed${label}.`);
+        }
+      });
+      if (d.status === 'completed' && old.status !== 'completed') notify(d.id, `Completed: "${d.title}"`, `All parties have signed${label}. The signed PDF is ready.`);
+    }
+  }
+  lastSnapshot = snap;
+}
+
+function notify(docId, title, body) {
+  const n = new Notification(title, { body, icon: '/icons/icon-192.png', tag: `${docId}-${title}` });
+  n.onclick = () => {
+    window.focus();
+    location.hash = `#/doc/${docId}`;
+    n.close();
+  };
+}
+
 // ---------------- Document list ----------------
 async function showList() {
   app.innerHTML = `
@@ -90,6 +131,11 @@ async function showList() {
              <button id="testBtn">Send test email</button>`
           : `<span>⚠️ <strong>Email is off</strong>, so signers won't receive emails. Copy each signer's link from the document page, or add your email settings to the <code>.env</code> file and restart (see README).</span>`}
       </div>
+      ${'Notification' in window && Notification.permission === 'default' ? `
+        <div class="card row" style="margin-bottom:16px;padding:10px 16px;flex-wrap:wrap" id="notifyBar">
+          <span style="flex:1;min-width:220px">🔔 Get a desktop notification when someone signs or an agreement is completed.</span>
+          <button id="notifyBtn">Turn on notifications</button>
+        </div>` : ''}
       <div class="drop" id="drop">
         <strong>Drop PDFs here</strong> or click to upload a document for signature
         <div class="small muted" style="margin-top:6px">Choose several PDFs to merge them into one document. You can reorder, rotate or delete pages afterwards.</div>
@@ -112,6 +158,13 @@ async function showList() {
         toast(e.message, 8000);
       }
       $('#testBtn').disabled = false;
+    };
+  }
+  if ($('#notifyBtn')) {
+    $('#notifyBtn').onclick = async () => {
+      const result = await Notification.requestPermission();
+      $('#notifyBar').remove();
+      toast(result === 'granted' ? 'Desktop notifications are on' : 'Notifications were not allowed. You can change this in your browser settings.', 4000);
     };
   }
   const drop = $('#drop');

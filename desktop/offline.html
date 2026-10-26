@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src 'self'">
+  <title>JRS eSign – can't connect</title>
+  <style>
+    body { font: 14px/1.5 "Segoe UI", system-ui, sans-serif; margin: 0; background: #f4f6fa; color: #1f2937; display: flex; min-height: 100vh; align-items: center; justify-content: center; }
+    .card { background: #fff; border: 1px solid #e5e7eb; border-radius: 12px; padding: 32px; max-width: 460px; text-align: center; }
+    h1 { font-size: 20px; margin: 12px 0 8px; }
+    .muted { color: #6b7280; font-size: 13px; }
+    code { background: #f3f4f6; padding: 2px 6px; border-radius: 4px; word-break: break-all; }
+    button { font: inherit; font-weight: 600; padding: 9px 18px; border-radius: 8px; border: 1px solid #d1d5db; background: #fff; cursor: pointer; margin: 4px; }
+    button.primary { background: #2563eb; border-color: #2563eb; color: #fff; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <img src="build/icon.png" alt="" width="64" height="64">
+    <h1>Can't reach the eSign server</h1>
+    <p class="muted">Server: <code id="server"></code></p>
+    <p class="muted" id="error"></p>
+    <p class="muted">Check your internet connection. If it works, the server may be switched off or restarting; contact your administrator. No agreements are stored on this PC, so nothing is lost.</p>
+    <button class="primary" onclick="window.esignDesktop.retry()">Try again</button>
+    <button onclick="window.esignDesktop.openSettings()">Change server address</button>
+    <p class="muted" style="margin-top:16px">Retrying automatically every 20 seconds…</p>
+  </div>
+  <script>
+    const q = new URLSearchParams(location.search);
+    document.getElementById('server').textContent = q.get('server') || '';
+    document.getElementById('error').textContent = q.get('error') ? `(${q.get('error')})` : '';
+    setInterval(() => window.esignDesktop.retry(), 20000);
+  </script>
+</body>
+</html>

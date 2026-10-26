@@ -125,3 +125,8 @@ function showLogo() {
   img.src = '/logo.png';
 }
 showLogo();
+
+// Installable app: the service worker only caches the page design and the offline page.
+if ('serviceWorker' in navigator && window.isSecureContext) {
+  navigator.serviceWorker.register('/sw.js').catch((e) => console.warn('Service worker not registered:', e.message));
+}

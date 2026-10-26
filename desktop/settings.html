@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src 'self'">
+  <title>JRS eSign settings</title>
+  <style>
+    body { font: 14px/1.5 "Segoe UI", system-ui, sans-serif; margin: 0; padding: 24px; color: #1f2937; background: #f4f6fa; }
+    h1 { font-size: 18px; margin: 0 0 4px; }
+    label { display: block; font-weight: 600; font-size: 12px; margin: 16px 0 4px; }
+    input[type=url] { width: 100%; box-sizing: border-box; padding: 8px 10px; border: 1px solid #d1d5db; border-radius: 8px; font: inherit; }
+    .check { display: flex; gap: 8px; align-items: center; font-weight: 500; font-size: 13px; }
+    .muted { color: #6b7280; font-size: 12px; }
+    .row { display: flex; gap: 8px; justify-content: flex-end; margin-top: 24px; }
+    button { font: inherit; font-weight: 600; padding: 8px 16px; border-radius: 8px; border: 1px solid #d1d5db; background: #fff; cursor: pointer; }
+    button.primary { background: #2563eb; border-color: #2563eb; color: #fff; }
+    #msg { color: #dc2626; font-size: 12px; min-height: 18px; margin-top: 6px; }
+  </style>
+</head>
+<body>
+  <h1>Settings</h1>
+  <div class="muted" id="version"></div>
+  <label for="url">eSign server address</label>
+  <input type="url" id="url" placeholder="https://sign.yourcompany.com" spellcheck="false">
+  <div class="muted">The same address people use in the web browser. All data stays on that server.</div>
+  <div id="msg"></div>
+  <label class="check"><input type="checkbox" id="tray"> Keep running in the tray when the window is closed (for notifications)</label>
+  <div class="row">
+    <button onclick="window.close()">Cancel</button>
+    <button class="primary" id="save">Save</button>
+  </div>
+  <script>
+    (async () => {
+      const s = await window.esignDesktop.getSettings();
+      document.getElementById('url').value = s.serverUrl;
+      document.getElementById('tray').checked = s.closeToTray !== false;
+      document.getElementById('version').textContent = `JRS eSign desktop ${s.version}`;
+    })();
+    document.getElementById('save').onclick = async () => {
+      const r = await window.esignDesktop.saveSettings({ serverUrl: document.getElementById('url').value, closeToTray: document.getElementById('tray').checked });
+      if (r.error) document.getElementById('msg').textContent = r.error;
+      else window.close();
+    };
+  </script>
+</body>
+</html>

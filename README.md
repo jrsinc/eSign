@@ -57,6 +57,33 @@ Gmail / Google Workspace: `SMTP_HOST=smtp.gmail.com`, `SMTP_PORT=587`, and an Ap
 3. Configure SMTP so signers get emails automatically.
 4. **Back up the `data/` folder** regularly: it holds every document, signed copy and audit trail.
 
+## Desktop and installable app
+
+Both are windows onto the **same server and database**. Nothing about agreements is stored on the PC.
+
+### Installable web app (no installer needed)
+
+1. Open the eSign address over **HTTPS** in Chrome or Edge (e.g. the ngrok or company address). Installing does not work over plain `http://` IP addresses.
+2. Click the **Install** icon (⊕) in the address bar, or menu ⋮ → *Apps* → *Install JRS LLC eSign*.
+3. It gets its own window, Start-menu and taskbar icon, desktop notifications, and an offline screen. Updates arrive automatically with the website.
+
+The service worker caches only the page design and the offline page, never agreements, PDFs or `/api/` data.
+
+### Windows desktop app (`desktop/`)
+
+```bash
+cd desktop
+npm install
+npm start          # run it
+npm run dist       # build the installer: desktop/dist/JRS eSign Setup <version>.exe
+npm run icons      # rebuild icons after changing public/logo.png
+```
+
+- Server address: set in `desktop/config.json` before building, changeable later in **File → Settings**. IT can force it on every PC with the `ESIGN_SERVER_URL` environment variable.
+- Tray icon (keeps notifications coming when the window is closed), optional *Start with Windows*, offline screen with automatic retry.
+- Security: only the eSign server's pages open inside the app (other links open in the browser); the website has no access to the PC; only notification and clipboard permissions are granted.
+- The installer is not code-signed, so Windows SmartScreen shows "Windows protected your PC" → *More info* → *Run anyway*. For company-wide rollout, sign it with a code-signing certificate.
+
 ## Legal note
 
 Signatures made this way are "simple electronic signatures", backed by an audit trail and consent record. They are legally accepted for most business contracts in many places (e.g. US ESIGN/UETA, EU eIDAS, India IT Act for many document types). Some documents need stronger signatures or wet ink, such as wills, some property transfers, or qualified/Aadhaar e-signatures in some countries. Check with your lawyer for your use cases.
@@ -69,4 +96,6 @@ lib/store.js       JSON-file database
 lib/finalize.js    Builds the signed PDF + certificate
 lib/mailer.js      SMTP email
 public/            Dashboard (index.html, admin.js), signer page (sign.html, sign.js), verify.html
+public/manifest.webmanifest, sw.js, offline.html, icons/   Installable web app
+desktop/           Windows desktop app (Electron)
 ```

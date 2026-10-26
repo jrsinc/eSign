@@ -2,3 +2,4 @@ node_modules/
 data/
 .claude/
 .env
+desktop/dist/
