@@ -194,7 +194,7 @@ function showEditor(doc) {
         method: 'PUT',
         body: {
           title: doc.title, message: doc.message, emailSubject: doc.emailSubject, signingOrder: doc.signingOrder,
-          reminder: doc.reminder, requireReason: doc.requireReason !== false, stampPage: doc.stampPage !== false, signers: doc.signers, fields: doc.fields,
+          reminder: doc.reminder, requireReason: doc.requireReason !== false, stampPage: doc.stampPage !== false, digitalSign: doc.digitalSign !== false, signers: doc.signers, fields: doc.fields,
         },
       });
       $('#saveState').textContent = 'All changes saved';
@@ -260,7 +260,9 @@ function showEditor(doc) {
         <label class="check"><input type="checkbox" id="reqReason"> Ask signers for a reason when they sign</label>
         <p class="small muted">The reason appears under each signature and in the audit report.</p>
         <label class="check"><input type="checkbox" id="stampPage"> Add a signature page for every signer</label>
-        <p class="small muted">After the document: each signer's signature, email, title and company.</p>`);
+        <p class="small muted">After the document: each signer's signature, email, title and company.</p>
+        <label class="check"><input type="checkbox" id="digitalSign"> Digitally sign with certificates</label>
+        <p class="small muted">Each signer gets a personal certificate and a cryptographic signature in the PDF, shown in Adobe's Signatures panel. <a href="/ca.cer">Root certificate</a></p>`);
 
     sb.querySelectorAll('[data-acc]').forEach((b) => (b.onclick = () => { open[b.dataset.acc] = !open[b.dataset.acc]; renderSidebar(); }));
     $('#order').value = doc.signingOrder;
@@ -271,6 +273,8 @@ function showEditor(doc) {
     $('#reqReason').onchange = (e) => { doc.requireReason = e.target.checked; scheduleSave(); };
     $('#stampPage').checked = doc.stampPage !== false;
     $('#stampPage').onchange = (e) => { doc.stampPage = e.target.checked; scheduleSave(); };
+    $('#digitalSign').checked = doc.digitalSign !== false;
+    $('#digitalSign').onchange = (e) => { doc.digitalSign = e.target.checked; scheduleSave(); };
     $('#title').oninput = (e) => { doc.title = e.target.value; scheduleSave(); };
     $('#subject').oninput = (e) => { doc.emailSubject = e.target.value; scheduleSave(); };
     $('#msg').oninput = (e) => { doc.message = e.target.value; scheduleSave(); };
@@ -382,6 +386,13 @@ function showEditor(doc) {
         <select id="cfDate">${me.dateFormats.map((d) => `<option>${d}</option>`).join('')}</select>` : ''}
       <label for="cfName">${f.type === 'radio' ? 'Option label' : 'Field name'}</label>
       <input id="cfName" value="${esc(f.label)}" placeholder="${esc(FIELD_TYPES[f.type].label)}">
+      ${f.type === 'signature' ? `
+        <label for="cfAppearance">Signature style</label>
+        <select id="cfAppearance">
+          <option value="standard">Handwritten, with name, time and reason below</option>
+          <option value="digital">Digital ID stamp (like Adobe)</option>
+        </select>
+        <p class="small muted">Digital ID stamp: the name large on the left; "Digitally signed by", DN, reason and date on the right.</p>` : ''}
       ${f.type === 'radio' ? `
         <label for="cfGroup">Radio group</label>
         <input id="cfGroup" value="${esc(f.group)}">
@@ -420,6 +431,7 @@ function showEditor(doc) {
     };
     if ($('#cfDate')) { $('#cfDate').value = f.dateFormat; $('#cfDate').onchange = (e) => { f.dateFormat = e.target.value; changed(); }; }
     $('#cfName').oninput = (e) => { f.label = e.target.value; changed(); };
+    if ($('#cfAppearance')) { $('#cfAppearance').value = f.appearance || 'standard'; $('#cfAppearance').onchange = (e) => { f.appearance = e.target.value; changed(); }; }
     if ($('#cfGroup')) $('#cfGroup').oninput = (e) => { f.group = e.target.value; changed(); };
     if ($('#cfOptions')) $('#cfOptions').oninput = (e) => { f.options = e.target.value.split('\n').map((s) => s.trim()).filter(Boolean); changed(); };
     if ($('#cfReq')) $('#cfReq').onchange = (e) => { f.required = e.target.checked; changed(); };
@@ -483,6 +495,7 @@ function showEditor(doc) {
 
   function fieldText(f) {
     if (f.type === 'checkbox' || f.type === 'radio') return '';
+    if (f.type === 'signature' && f.appearance === 'digital') return 'Digital ID stamp';
     if (f.type === 'date') return `${FIELD_TYPES.date.label} (${f.dateFormat.toLowerCase()})`;
     if (f.type === 'datefield') return `${f.label || 'Date'} (${f.dateFormat.toLowerCase()})`;
     if (f.type === 'dropdown') return `${f.label || 'Select'} ▾`;

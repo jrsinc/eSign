@@ -17,12 +17,15 @@ const mailer = require('./lib/mailer');
 const { finalize, pageFrame } = require('./lib/finalize');
 const { DATE_FORMATS, validTz, formatDate, formatIsoDay, auditStamp } = require('./lib/dates');
 const { PDFDocument, degrees } = require('pdf-lib');
+const { loadOrCreateCA, issueSignerCertificate } = require('./lib/pki');
 
 const PORT = Number(process.env.PORT || 3000);
 const BASE_URL = (process.env.BASE_URL || `http://localhost:${PORT}`).replace(/\/$/, '');
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'admin';
 const COMPANY = mailer.COMPANY;
 const SENDER_EMAIL = process.env.NOTIFY_EMAIL || process.env.MAIL_FROM || '';
+// The app's own certificate authority for digital signatures (created on first run in data/pki).
+const CA = loadOrCreateCA(path.join(store.DATA_DIR, 'pki'), COMPANY);
 const AGREEMENT_PREFIX = String(process.env.AGREEMENT_PREFIX || 'AGR').replace(/[^A-Za-z0-9]/g, '').slice(0, 10) || 'AGR';
 if (!process.env.ADMIN_PASSWORD) console.warn('WARNING: ADMIN_PASSWORD not set, using "admin". Set it before real use.');
 
@@ -166,6 +169,7 @@ app.post('/api/documents', requireAdmin, upload.array('file', 20), async (req, r
     reminder: 'none',
     requireReason: true,
     stampPage: true,
+    digitalSign: true,
     status: 'draft',
     signingOrder: 'sequential',
     senderName: COMPANY,
@@ -204,6 +208,7 @@ function cleanField(f) {
     dateFormat: DATE_FORMATS.includes(f.dateFormat) ? f.dateFormat : 'MM/DD/YYYY',
     options: Array.isArray(f.options) ? f.options.map((o) => String(o).trim().slice(0, 100)).filter(Boolean).slice(0, 50) : [],
     group: String(f.group || '').slice(0, 60),
+    appearance: f.type === 'signature' && f.appearance === 'digital' ? 'digital' : 'standard',
     style: {
       font: FONTS.includes(st.font) ? st.font : 'Helvetica',
       size: st.size === 'auto' || !st.size ? 'auto' : Math.min(36, Math.max(6, Number(st.size) || 10)),
@@ -220,6 +225,7 @@ app.put('/api/documents/:id', requireAdmin, (req, res) => {
   if (doc.status !== 'draft') return res.status(400).json({ error: 'Only drafts can be edited' });
   const { title, message, emailSubject, signingOrder, reminder, requireReason, stampPage, signers, fields } = req.body;
   if (typeof stampPage === 'boolean') doc.stampPage = stampPage;
+  if (typeof req.body.digitalSign === 'boolean') doc.digitalSign = req.body.digitalSign;
   if (typeof title === 'string' && title.trim()) doc.title = title.trim().slice(0, 200);
   if (typeof message === 'string') doc.message = message.slice(0, 2000);
   if (typeof emailSubject === 'string') doc.emailSubject = emailSubject.slice(0, 200);
@@ -481,6 +487,13 @@ app.get('/api/documents/:id/signed', requireAdmin, (req, res) => {
   sendPdf(res, doc.finalFile, `${doc.title} - signed.pdf`, false);
 });
 
+// Public root certificate: import it into Adobe / Windows so these digital signatures show as trusted.
+app.get('/ca.cer', (req, res) => {
+  res.setHeader('Content-Type', 'application/x-x509-ca-cert');
+  res.setHeader('Content-Disposition', `attachment; filename="${COMPANY.replace(/[^\w-]/g, '_')}-eSign-Root-CA.cer"`);
+  res.send(fs.readFileSync(CA.certFile));
+});
+
 // ---------- Email-open tracking ("Email viewed by ...") ----------
 const PIXEL = Buffer.from('R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7', 'base64');
 app.get('/t/:file', (req, res) => {
@@ -557,6 +570,32 @@ app.get('/api/sign/:token/file', (req, res) => {
   if (doc.status !== 'sent' || !activeSigners(doc).includes(signer)) return res.status(403).json({ error: 'This document is not available.' });
   sendPdf(res, doc.originalFile, `${doc.title}.pdf`, true);
 });
+
+// Issues each signer's certificate (logged first, so the audit report lists it), then builds the
+// final PDF with embedded digital signatures. If digital signing fails, the agreement still
+// completes with visual signatures and the failure is recorded.
+async function buildFinalPdf(doc) {
+  const original = fs.readFileSync(filePath(doc.originalFile));
+  let certs = null;
+  if (doc.digitalSign !== false) {
+    certs = {};
+    for (const s of [...doc.signers].sort((a, b) => a.order - b.order)) {
+      const cert = issueSignerCertificate(CA, { name: s.name, email: s.email, title: s.title, company: s.company });
+      certs[s.id] = cert;
+      s.certificate = { serial: cert.serial, dn: cert.dn, pem: cert.certPem };
+      log(doc, `Digital certificate issued to ${who(s)}`, null, 'signed', `Certificate serial: ${cert.serial} - Subject: ${cert.dn} - Issuer: ${COMPANY} eSign Root CA - Algorithm: RSA 2048 / SHA-256`);
+    }
+  }
+  log(doc, 'Agreement completed.', null, 'completed');
+  try {
+    return await finalize({ ...doc, status: 'completed' }, original, COMPANY, { certs });
+  } catch (e) {
+    if (!certs) throw e;
+    console.error('Digital signing failed:', e);
+    log(doc, `Digital signatures could not be applied (${e.message}). The document was completed with electronic signatures only.`, null, 'failed');
+    return finalize({ ...doc, status: 'completed' }, original, COMPANY);
+  }
+}
 
 const isPng = (v) => typeof v === 'string' && /^data:image\/png;base64,[A-Za-z0-9+/=]+$/.test(v) && v.length < 700000;
 const fieldName = (f) => f.label || { company: 'Company', title: 'Title', number: 'Number', datefield: 'Date', dropdown: 'Dropdown', text: 'Text' }[f.type] || f.type;
@@ -661,8 +700,7 @@ app.post('/api/sign/:token', async (req, res) => {
 
   if (doc.signers.every((s) => s.status === 'signed')) {
     doc.completedAt = now();
-    log(doc, 'Agreement completed.', null, 'completed');
-    const bytes = await finalize({ ...doc, status: 'completed' }, fs.readFileSync(filePath(doc.originalFile)), COMPANY);
+    const bytes = await buildFinalPdf(doc);
     doc.status = 'completed';
     doc.finalFile = `${id(9)}-signed.pdf`;
     doc.finalHash = sha256(bytes);
