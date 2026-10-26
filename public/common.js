@@ -16,8 +16,12 @@ const FIELD_TYPES = {
   dropdown: { label: 'Drop-down menu', icon: '▾', size: [140, 22] },
   company: { label: 'Company', icon: '🏢', size: [170, 22] },
   title: { label: 'Title', icon: '🪪', size: [170, 22] },
+  formula: { label: 'Formula', icon: '🧮', size: [100, 22] },
+  attachment: { label: 'Attachment', icon: '📎', size: [160, 22] },
+  note: { label: 'Note', icon: '🗒', size: [170, 44] },
+  stamp: { label: 'Stamp', icon: '🔏', size: [100, 100] },
 };
-const TEXT_LIKE = ['text', 'date', 'name', 'email', 'datefield', 'number', 'dropdown', 'company', 'title'];
+const TEXT_LIKE = ['text', 'date', 'name', 'email', 'datefield', 'number', 'dropdown', 'company', 'title', 'formula', 'attachment'];
 const FONT_CSS = { Helvetica: 'Helvetica, Arial, sans-serif', Times: '"Times New Roman", Times, serif', Courier: '"Courier New", Courier, monospace' };
 
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];

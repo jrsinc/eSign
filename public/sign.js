@@ -124,6 +124,67 @@ async function load() {
           updateProgress();
         };
         break;
+      case 'formula':
+        // Calculated live from other fields; the server recalculates it when signing.
+        auto('');
+        el.classList.add('formula');
+        el.title = `Calculated: ${f.formula}`;
+        break;
+      case 'note':
+        el.classList.add('note', 'done');
+        el.innerHTML = `<span>🗒 ${esc(f.note)}</span>`;
+        el.title = 'Note from the sender';
+        break;
+      case 'attachment': {
+        const pick = Object.assign(document.createElement('input'), { type: 'file', accept: '.pdf,.png,.jpg,.jpeg,.docx,.xlsx,.txt,.csv', hidden: true });
+        const label = document.createElement('span');
+        label.className = 'ftext';
+        const show = (name) => {
+          label.textContent = name ? `📎 ${name}` : `📎 ${f.label || 'Attach a file'}${f.required ? '' : ' (optional)'}`;
+          el.classList.toggle('done', !!name || !f.required);
+          if (name) values[f.id] = name;
+        };
+        show(info.attached?.[f.id]);
+        pick.onchange = async () => {
+          const file = pick.files[0];
+          if (!file) return;
+          if (file.size > 10 * 1024 * 1024) return toast('File is larger than 10 MB');
+          const fd = new FormData();
+          fd.append('file', file);
+          label.textContent = 'Uploading…';
+          try {
+            const r = await api(`/api/sign/${encodeURIComponent(token)}/attachment/${f.id}`, { method: 'POST', body: fd });
+            show(r.name);
+            toast('File attached');
+          } catch (e) {
+            show(values[f.id]);
+            toast(e.message, 4000);
+          }
+          updateProgress();
+        };
+        el.append(label, pick);
+        el.onclick = (e) => { if (e.target !== pick) pick.click(); };
+        break;
+      }
+      case 'stamp': {
+        const pick = Object.assign(document.createElement('input'), { type: 'file', accept: 'image/png,image/jpeg', hidden: true });
+        el.textContent = `🔏 ${f.label || 'Add your stamp'}`;
+        if (!f.required) el.classList.add('done');
+        pick.onchange = async () => {
+          const file = pick.files[0];
+          if (!file) return;
+          try {
+            const url = await imageToPng(file, false);
+            values[f.id] = url;
+            el.innerHTML = `<img alt="stamp" src="${url}">`;
+            el.classList.add('done');
+            updateProgress();
+          } catch (e) { toast(e.message); }
+        };
+        el.append(pick);
+        el.onclick = (e) => { if (e.target !== pick) pick.click(); };
+        break;
+      }
       default:
         el.textContent = f.type === 'signature' ? 'Click to sign' : 'Initial';
         el.onclick = () => (adopted[f.type] ? applySig(f.type) : openPad(f.type));
@@ -160,7 +221,7 @@ function remaining() {
     const v = values[f.id];
     if (f.type === 'signature' || f.type === 'initials') {
       if (!v) out.push(item);
-    } else if (['text', 'company', 'title', 'number', 'datefield', 'dropdown'].includes(f.type)) {
+    } else if (['text', 'company', 'title', 'number', 'datefield', 'dropdown', 'attachment', 'stamp'].includes(f.type)) {
       if (f.required && !String(v || '').trim()) out.push(item);
     } else if (f.type === 'checkbox') {
       if (f.required && !v) out.push(item);
@@ -175,7 +236,23 @@ function remaining() {
   return out;
 }
 
+// Live preview of Formula fields from this signer's own fields (the server makes the final calculation).
+function recalcFormulas() {
+  const valueOf = (name) => {
+    const o = fieldEls.find((x) => (x.f.label || '').trim().toLowerCase() === name.toLowerCase());
+    return o ? values[o.f.id] : '';
+  };
+  for (let pass = 0; pass < 2; pass++) {
+    for (const { f, el } of fieldEls) {
+      if (f.type !== 'formula') continue;
+      values[f.id] = Formula.calculate(f.formula, valueOf, f.decimals);
+      el.querySelector('.ftext').textContent = values[f.id] || '—';
+    }
+  }
+}
+
 function updateProgress() {
+  recalcFormulas();
   const left = remaining().length;
   $('#progress').textContent = left ? `${left} required field${left > 1 ? 's' : ''} left` : 'All fields complete';
   $('#nextBtn').classList.toggle('hidden', !left);
@@ -270,6 +347,54 @@ function openPad(type) {
 }
 $('#cancelSig').onclick = () => $('#modal').classList.add('hidden');
 
+// Turns an uploaded JPG/PNG into a PNG data URL (max 1200 px wide). For signatures the white paper
+// background becomes transparent and the image is cropped to the ink.
+async function imageToPng(file, removeWhite) {
+  if (!/^image\/(png|jpeg)$/.test(file.type)) throw new Error('Please choose a PNG or JPG image');
+  if (file.size > 8 * 1024 * 1024) throw new Error('Image is larger than 8 MB');
+  const img = await new Promise((resolve, reject) => {
+    const i = new Image();
+    i.onload = () => resolve(i);
+    i.onerror = () => reject(new Error('That image could not be opened'));
+    i.src = URL.createObjectURL(file);
+  });
+  const scale = Math.min(1, 1200 / img.width);
+  const c = document.createElement('canvas');
+  c.width = Math.round(img.width * scale);
+  c.height = Math.round(img.height * scale);
+  const x = c.getContext('2d');
+  x.drawImage(img, 0, 0, c.width, c.height);
+  URL.revokeObjectURL(img.src);
+  if (removeWhite) {
+    const data = x.getImageData(0, 0, c.width, c.height);
+    const p = data.data;
+    for (let k = 0; k < p.length; k += 4) {
+      const light = (p[k] + p[k + 1] + p[k + 2]) / 3;
+      if (light > 200) p[k + 3] = 0;
+      else if (light > 150) p[k + 3] = Math.round(((200 - light) / 50) * 255);
+    }
+    x.putImageData(data, 0, 0);
+    const url = trimmed(c);
+    if (!url) throw new Error('No signature found in that image');
+    return url;
+  }
+  return c.toDataURL('image/png');
+}
+
+let uploadedSig = null;
+$('#sigFile').onchange = async () => {
+  const file = $('#sigFile').files[0];
+  uploadedSig = null;
+  $('#sigFilePreview').removeAttribute('src');
+  if (!file) return;
+  try {
+    uploadedSig = await imageToPng(file, true);
+    $('#sigFilePreview').src = uploadedSig;
+  } catch (e) {
+    toast(e.message, 4000);
+  }
+};
+
 // Crop a canvas to its inked pixels so the image fills the field nicely.
 function trimmed(canvas) {
   const c = canvas.getContext('2d');
@@ -299,6 +424,9 @@ $('#adoptSig').onclick = () => {
   let url;
   if (mode === 'saved') {
     url = info.profile[padType];
+  } else if (mode === 'upload') {
+    if (!uploadedSig) return toast('Please choose an image of your signature');
+    url = uploadedSig;
   } else if (mode === 'draw') {
     if (!inked) return toast('Please draw your signature');
     url = trimmed(pad);
@@ -317,7 +445,7 @@ $('#adoptSig').onclick = () => {
   }
   if (!url) return toast('Signature is empty');
   adopted[padType] = url;
-  if (padType === 'signature') appearance = mode === 'saved' ? (info.profile.appearance || 'DRAW') : mode === 'draw' ? 'DRAW' : 'TYPE';
+  if (padType === 'signature') appearance = mode === 'saved' ? (info.profile.appearance || 'DRAW') : { draw: 'DRAW', type: 'TYPE', upload: 'UPLOAD' }[mode];
   applySig(padType);
   $('#modal').classList.add('hidden');
 };

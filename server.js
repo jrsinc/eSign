@@ -18,6 +18,9 @@ const { finalize, pageFrame } = require('./lib/finalize');
 const { DATE_FORMATS, validTz, formatDate, formatIsoDay, auditStamp } = require('./lib/dates');
 const { PDFDocument, degrees } = require('pdf-lib');
 const { loadOrCreateCA, issueSignerCertificate } = require('./lib/pki');
+const Formula = require('./public/formula.js');
+const audit = require('./lib/audit');
+const { inspectSignatures } = require('./lib/verifysig');
 
 const PORT = Number(process.env.PORT || 3000);
 const BASE_URL = (process.env.BASE_URL || `http://localhost:${PORT}`).replace(/\/$/, '');
@@ -53,14 +56,30 @@ const signLink = (s) => `${BASE_URL}/sign.html?t=${s.token}`;
 const who = (s) => `${s.name} (${s.email})`;
 const isEmail = (s) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s);
 const COLORS = ['#2563eb', '#db2777', '#059669', '#d97706', '#7c3aed', '#dc2626', '#0891b2', '#65a30d'];
-const FIELD_TYPES = ['signature', 'initials', 'date', 'name', 'email', 'company', 'title', 'text', 'number', 'datefield', 'checkbox', 'radio', 'dropdown'];
+const FIELD_TYPES = ['signature', 'initials', 'date', 'name', 'email', 'company', 'title', 'text', 'number', 'datefield', 'checkbox', 'radio', 'dropdown', 'formula', 'attachment', 'note', 'stamp'];
+// Files a signer may attach in an Attachment field.
+const ATTACHMENT_TYPES = { pdf: 'application/pdf', png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', txt: 'text/plain', csv: 'text/csv' };
 const FONTS = ['Helvetica', 'Times', 'Courier'];
 const REMINDERS = { none: 0, daily: 864e5, every2days: 2 * 864e5, weekly: 7 * 864e5 };
 const REASONS = ['I approve this document', 'I have reviewed this document', 'I am the author of this document', 'I agree to the terms of this document', 'I certify the information is true and correct'];
 
 // Audit events. `type` picks the icon in the audit report; `detail` replaces the default "time - IP" line.
+// Each event records who acted and is hash-chained to the one before (see lib/audit.js), so the
+// trail is append-only: any later edit or deletion is detected.
 function log(doc, text, req, type = 'info', detail) {
-  doc.events.push({ at: now(), text, ip: req ? clientIp(req) : undefined, type, ...(detail ? { detail } : {}) });
+  const entry = { at: now(), actor: req?.actor || 'System', text, ip: req ? clientIp(req) : undefined, type, ...(detail ? { detail } : {}) };
+  doc.events.push(audit.seal(doc.events, entry));
+}
+const syslog = audit.systemLog(store.DATA_DIR);
+const sysLog = (req, type, text, detail) => syslog.add({ actor: req?.actor || 'System', type, text, ip: req ? clientIp(req) : undefined, ...(detail ? { detail } : {}) });
+
+// Short device description for the audit trail, e.g. "Chrome 141 on Windows".
+function deviceOf(ua = '') {
+  const browser = (/Edg\/(\d+)/.exec(ua) && `Edge ${RegExp.$1}`) || (/OPR\/(\d+)/.exec(ua) && `Opera ${RegExp.$1}`)
+    || (/Chrome\/(\d+)/.exec(ua) && `Chrome ${RegExp.$1}`) || (/Firefox\/(\d+)/.exec(ua) && `Firefox ${RegExp.$1}`)
+    || (/Version\/(\d+).*Safari/.exec(ua) && `Safari ${RegExp.$1}`) || 'Unknown browser';
+  const os = /Windows/.test(ua) ? 'Windows' : /Android/.test(ua) ? 'Android' : /iPhone|iPad/.test(ua) ? 'iOS' : /Mac OS X/.test(ua) ? 'macOS' : /Linux/.test(ua) ? 'Linux' : 'unknown OS';
+  return `${browser} on ${os}`;
 }
 
 // ---------- Admin auth (sessions survive restarts) ----------
@@ -73,21 +92,31 @@ const saveSessions = () => {
 function requireAdmin(req, res, next) {
   const s = sessions.get(req.cookies.sid);
   if (!s || s.expires < Date.now()) return res.status(401).json({ error: 'Not logged in' });
+  req.actor = 'Administrator';
   next();
 }
 
 app.post('/api/login', (req, res) => {
   const digest = (s) => crypto.createHash('sha256').update(String(s)).digest();
   const ok = typeof req.body.password === 'string' && crypto.timingSafeEqual(digest(req.body.password), digest(ADMIN_PASSWORD));
-  if (!ok) return res.status(401).json({ error: 'Wrong password' });
+  if (!ok) {
+    sysLog(req, 'login_failed', 'Failed sign-in attempt (wrong password)', `Device: ${deviceOf(req.headers['user-agent'])}`);
+    return res.status(401).json({ error: 'Wrong password' });
+  }
   const sid = id(24);
   sessions.set(sid, { expires: Date.now() + 12 * 3600 * 1000 });
   saveSessions();
+  req.actor = 'Administrator';
+  sysLog(req, 'login', 'Administrator signed in', `Device: ${deviceOf(req.headers['user-agent'])}`);
   // HTTPS-only when the visitor came in over HTTPS (e.g. through ngrok), so local http:// access still works.
   res.cookie('sid', sid, { httpOnly: true, sameSite: 'lax', secure: req.secure });
   res.json({ ok: true });
 });
 app.post('/api/logout', (req, res) => {
+  if (sessions.has(req.cookies.sid)) {
+    req.actor = 'Administrator';
+    sysLog(req, 'logout', 'Administrator signed out');
+  }
   sessions.delete(req.cookies.sid);
   saveSessions();
   res.clearCookie('sid');
@@ -102,6 +131,7 @@ app.post('/api/test-email', requireAdmin, async (req, res) => {
   if (!isEmail(to)) return res.status(400).json({ error: 'Enter a valid email address.' });
   try {
     await mailer.send({ to, subject: `${COMPANY} eSign test email`, heading: 'Email is working', text: 'Your e-signature system can send email. Signers will now receive their signing links automatically.' });
+    sysLog(req, 'email', `Test email sent to ${to}`);
     res.json({ ok: true });
   } catch (e) {
     const loginRejected = e.responseCode === 535 || e.code === 'EAUTH';
@@ -146,6 +176,8 @@ function adminView(doc) {
     // A signer only has a link once it is their turn (see issueLinks).
     signers: doc.signers.map(({ token, ...s }) => ({ ...s, link: token && doc.status === 'sent' ? signLink({ token }) : null })),
     fields: doc.fields.map((f) => ({ ...f, value: f.type === 'signature' || f.type === 'initials' ? (f.value ? '[signed]' : null) : f.value })),
+    comments: doc.comments || [],
+    auditIntegrity: audit.verify(doc.events),
   };
 }
 
@@ -204,7 +236,10 @@ function cleanField(f) {
     type: f.type,
     page: Math.max(0, Math.floor(Number(f.page) || 0)),
     x: clamp(f.x), y: clamp(f.y), w: clamp(f.w), h: clamp(f.h),
-    required: f.type === 'checkbox' || f.type === 'radio' ? !!f.required : f.required !== false,
+    required: f.type === 'note' || f.type === 'formula' ? false : f.type === 'checkbox' || f.type === 'radio' ? !!f.required : f.required !== false,
+    formula: f.type === 'formula' ? String(f.formula || '').slice(0, 300) : '',
+    decimals: Math.min(6, Math.max(0, Math.floor(Number(f.decimals ?? 2)) || 0)),
+    note: f.type === 'note' ? String(f.note || '').slice(0, 1000) : '',
     label: String(f.label || '').slice(0, 80),
     dateFormat: DATE_FORMATS.includes(f.dateFormat) ? f.dateFormat : 'MM/DD/YYYY',
     options: Array.isArray(f.options) ? f.options.map((o) => String(o).trim().slice(0, 100)).filter(Boolean).slice(0, 50) : [],
@@ -225,6 +260,7 @@ app.put('/api/documents/:id', requireAdmin, (req, res) => {
   if (!doc) return res.status(404).json({ error: 'Not found' });
   if (doc.status !== 'draft') return res.status(400).json({ error: 'Only drafts can be edited' });
   const { title, message, emailSubject, signingOrder, reminder, requireReason, stampPage, signers, fields } = req.body;
+  const before = JSON.parse(JSON.stringify({ ...doc, events: undefined, comments: undefined }));
   if (typeof stampPage === 'boolean') doc.stampPage = stampPage;
   if (typeof req.body.digitalSign === 'boolean') doc.digitalSign = req.body.digitalSign;
   if (typeof title === 'string' && title.trim()) doc.title = title.trim().slice(0, 200);
@@ -247,9 +283,56 @@ app.put('/api/documents/:id', requireAdmin, (req, res) => {
     const ids = new Set(doc.signers.map((s) => s.id));
     doc.fields = fields.filter((f) => ids.has(f.signerId) && FIELD_TYPES.includes(f.type)).slice(0, 1000).map(cleanField);
   }
+  const changes = describeDraftChanges(before, doc);
+  const last = doc.events[doc.events.length - 1];
+  const text = `Draft edited: ${changes.join('; ')}`;
+  // Typing in a box saves repeatedly; identical summaries within 2 minutes are recorded once.
+  if (changes.length && !(last?.type === 'edit' && last.text === text && Date.now() - Date.parse(last.at) < 120000)) log(doc, text, req, 'edit');
   store.save();
   res.json(adminView(doc));
 });
+
+// Human-readable list of what changed in a draft, for the audit trail.
+function describeDraftChanges(a, b) {
+  const out = [];
+  const settings = [
+    ['title', (v) => `agreement name set to "${v}"`], ['emailSubject', () => 'email subject changed'], ['message', () => 'email message changed'],
+    ['signingOrder', (v) => `signing order set to ${v === 'sequential' ? 'one after another' : 'everyone at once'}`],
+    ['reminder', (v) => `reminders set to ${v}`], ['requireReason', (v) => `reason for signing ${v === false ? 'not required' : 'required'}`],
+    ['stampPage', (v) => `signature page ${v === false ? 'off' : 'on'}`], ['digitalSign', (v) => `digital signing ${v === false ? 'off' : 'on'}`],
+  ];
+  for (const [k, msg] of settings) if (JSON.stringify(a[k]) !== JSON.stringify(b[k])) out.push(msg(b[k]));
+  const label = (s) => s.name || s.email || 'unnamed recipient';
+  const oldS = new Map(a.signers.map((s) => [s.id, s]));
+  const newS = new Map(b.signers.map((s) => [s.id, s]));
+  for (const s of b.signers) if (!oldS.has(s.id)) out.push(`recipient added (${s.order})`);
+  for (const s of a.signers) if (!newS.has(s.id)) out.push(`recipient removed: ${label(s)}`);
+  for (const s of b.signers) {
+    const o = oldS.get(s.id);
+    if (o && (o.name !== s.name || o.email !== s.email)) out.push(`recipient ${s.order} details: ${label(s)}${s.email ? ` <${s.email}>` : ''}`);
+  }
+  const keptOrder = (list, other) => list.filter((s) => other.has(s.id)).map((s) => s.id).join();
+  if (keptOrder(a.signers, newS) !== keptOrder(b.signers, oldS)) out.push(`signing order changed: ${b.signers.map((s) => `${s.order}. ${label(s)}`).join(', ')}`);
+  const oldF = new Map(a.fields.map((f) => [f.id, f]));
+  const newF = new Map(b.fields.map((f) => [f.id, f]));
+  const added = b.fields.filter((f) => !oldF.has(f.id));
+  const removed = a.fields.filter((f) => !newF.has(f.id));
+  let moved = 0;
+  let edited = 0;
+  for (const f of b.fields) {
+    const o = oldF.get(f.id);
+    if (!o) continue;
+    if (o.x !== f.x || o.y !== f.y || o.w !== f.w || o.h !== f.h || o.page !== f.page) moved++;
+    const { x, y, w, h, page, ...rest } = f;
+    const { x: ox, y: oy, w: ow, h: oh, page: op, ...orest } = o;
+    if (JSON.stringify(rest) !== JSON.stringify(orest)) edited++;
+  }
+  if (added.length) out.push(`${added.length} field${added.length > 1 ? 's' : ''} added (${[...new Set(added.map((f) => f.type))].join(', ')})`);
+  if (removed.length) out.push(`${removed.length} field${removed.length > 1 ? 's' : ''} removed`);
+  if (moved) out.push(`${moved} field${moved > 1 ? 's' : ''} moved or resized`);
+  if (edited) out.push(`${edited} field${edited > 1 ? 's' : ''} settings changed`);
+  return out;
+}
 
 function removeFiles(doc) {
   const files = [doc.originalFile, doc.finalFile, ...Object.values(doc.sources || {}).map((s) => s.file)];
@@ -261,9 +344,51 @@ app.delete('/api/documents/:id', requireAdmin, (req, res) => {
   const doc = store.get(req.params.id);
   if (!doc) return res.status(404).json({ error: 'Not found' });
   if (doc.status !== 'draft') return res.status(403).json({ error: 'Agreements cannot be deleted. Cancel it instead.' });
+  sysLog(req, 'discard', `Unsent draft discarded: "${doc.title}"`, `Draft created ${auditStamp(doc.createdAt)} - ${doc.signers.length} recipient(s), ${doc.fields.length} field(s), ${(doc.comments || []).length} comment(s)`);
   removeFiles(doc);
   store.remove(doc.id);
   res.json({ ok: true });
+});
+
+// ---------- Comments on drafts (before sending) ----------
+// Team discussion while preparing an agreement. Comments can be pinned to a spot on a page and
+// resolved, but never edited or deleted; each one is recorded in the audit trail.
+app.post('/api/documents/:id/comments', requireAdmin, (req, res) => {
+  const doc = store.get(req.params.id);
+  if (!doc) return res.status(404).json({ error: 'Not found' });
+  if (doc.status !== 'draft') return res.status(400).json({ error: 'Comments can only be added before sending.' });
+  const author = String(req.body.author || '').trim().slice(0, 80);
+  const text = String(req.body.text || '').trim().slice(0, 2000);
+  if (!author) return res.status(400).json({ error: 'Please enter your name.' });
+  if (!text) return res.status(400).json({ error: 'Please write a comment.' });
+  const pinned = Number.isInteger(req.body.page) && req.body.x >= 0 && req.body.x <= 1 && req.body.y >= 0 && req.body.y <= 1;
+  const c = { id: id(6), author, text, at: now(), resolved: false, ...(pinned ? { page: req.body.page, x: Number(req.body.x), y: Number(req.body.y) } : {}) };
+  doc.comments = [...(doc.comments || []), c];
+  req.actor = `Administrator (${author})`;
+  log(doc, `Comment added by ${author}${pinned ? ` on page ${c.page + 1}` : ''}: "${text}"`, req, 'comment');
+  store.save();
+  res.json(c);
+});
+
+app.post('/api/documents/:id/comments/:cid/resolve', requireAdmin, (req, res) => {
+  const doc = store.get(req.params.id);
+  const c = doc?.comments?.find((x) => x.id === req.params.cid);
+  if (!c) return res.status(404).json({ error: 'Not found' });
+  if (doc.status !== 'draft') return res.status(400).json({ error: 'Comments are read-only after sending.' });
+  const author = String(req.body.author || '').trim().slice(0, 80) || 'Administrator';
+  c.resolved = req.body.resolved !== false;
+  c.resolvedBy = c.resolved ? author : undefined;
+  c.resolvedAt = c.resolved ? now() : undefined;
+  req.actor = `Administrator (${author})`;
+  log(doc, `Comment by ${c.author} ${c.resolved ? 'resolved' : 'reopened'} by ${author}: "${c.text.slice(0, 80)}"`, req, 'comment');
+  store.save();
+  res.json(c);
+});
+
+// System log (sign-ins, discarded drafts, test emails) with its integrity check.
+app.get('/api/system-log', requireAdmin, (req, res) => {
+  const entries = syslog.read();
+  res.json({ integrity: audit.verify(entries), entries: entries.slice(-500).reverse() });
 });
 
 // ---------- Admin: merge files & organize pages ----------
@@ -485,6 +610,8 @@ app.get('/api/documents/:id/original', requireAdmin, (req, res) => {
 app.get('/api/documents/:id/signed', requireAdmin, (req, res) => {
   const doc = store.get(req.params.id);
   if (!doc || !doc.finalFile) return res.status(404).end();
+  log(doc, 'Signed document downloaded by Administrator', req, 'download', `${auditStamp(now())} - IP address: ${clientIp(req)} - Device: ${deviceOf(req.headers['user-agent'])}`);
+  store.save();
   sendPdf(res, doc.finalFile, `${doc.title} - signed.pdf`, false);
 });
 
@@ -514,6 +641,7 @@ function signerCtx(req, res) {
     res.status(404).json({ error: 'This signing link is invalid.' });
     return null;
   }
+  req.actor = `${found.signer.name} (${found.signer.email})`;
   return found;
 }
 
@@ -551,6 +679,7 @@ app.get('/api/sign/:token', (req, res) => {
     fields: doc.fields
       .filter((f) => f.signerId === signer.id)
       .map(({ value, signerId, ...f }) => f),
+    attached: Object.fromEntries(Object.entries(signer.pendingAttachments || {}).map(([fid, a]) => [fid, a.name])),
     // Only while it is their turn, so a saved signature is never shown before they may sign.
     profile: waitingOn.length || doc.status !== 'sent' ? null : publicProfile(store.getProfile(signer.email)),
   });
@@ -577,6 +706,11 @@ app.get('/api/sign/:token/file', (req, res) => {
 // completes with visual signatures and the failure is recorded.
 async function buildFinalPdf(doc) {
   const original = fs.readFileSync(filePath(doc.originalFile));
+  const attachments = doc.fields.filter((f) => f.type === 'attachment' && f.attachment).map((f) => {
+    const s = doc.signers.find((x) => x.id === f.signerId);
+    return { name: f.attachment.name, bytes: fs.readFileSync(filePath(f.attachment.file)), mime: f.attachment.mime, at: f.attachment.at,
+      description: `${f.label || 'Attachment'} - attached by ${s ? who(s) : 'signer'} - SHA-256 ${f.attachment.sha256}` };
+  });
   let certs = null;
   if (doc.digitalSign !== false) {
     certs = {};
@@ -586,20 +720,28 @@ async function buildFinalPdf(doc) {
       s.certificate = { serial: cert.serial, dn: cert.dn, pem: cert.certPem };
       log(doc, `Digital certificate issued to ${who(s)}`, null, 'signed', `Certificate serial: ${cert.serial} - Subject: ${cert.dn} - Issuer: ${COMPANY} eSign Root CA - Algorithm: RSA 2048 / SHA-256`);
     }
+    // Company seal that certifies and locks the finished agreement.
+    const sealEmail = SENDER_EMAIL || 'esign@localhost';
+    certs.seal = { ...issueSignerCertificate(CA, { name: `${COMPANY} eSign`, email: sealEmail, company: COMPANY, title: 'Document certification' }), name: `${COMPANY} eSign`, email: sealEmail };
+    log(doc, `Document certified and locked by ${COMPANY} eSign`, null, 'signed',
+      `No changes allowed except signing (DocMDP level 2). Any other change invalidates the certification. Certificate serial: ${certs.seal.serial}`);
   }
   log(doc, 'Agreement completed.', null, 'completed');
   try {
-    return await finalize({ ...doc, status: 'completed' }, original, COMPANY, { certs });
+    const bytes = await finalize({ ...doc, status: 'completed' }, original, COMPANY, { certs, attachments });
+    doc.locked = !!certs;
+    return bytes;
   } catch (e) {
     if (!certs) throw e;
+    doc.locked = false;
     console.error('Digital signing failed:', e);
     log(doc, `Digital signatures could not be applied (${e.message}). The document was completed with electronic signatures only.`, null, 'failed');
-    return finalize({ ...doc, status: 'completed' }, original, COMPANY);
+    return finalize({ ...doc, status: 'completed' }, original, COMPANY, { attachments });
   }
 }
 
 const isPng = (v) => typeof v === 'string' && /^data:image\/png;base64,[A-Za-z0-9+/=]+$/.test(v) && v.length < 700000;
-const fieldName = (f) => f.label || { company: 'Company', title: 'Title', number: 'Number', datefield: 'Date', dropdown: 'Dropdown', text: 'Text' }[f.type] || f.type;
+const fieldName = (f) => f.label || { company: 'Company', title: 'Title', number: 'Number', datefield: 'Date', dropdown: 'Dropdown', text: 'Text', attachment: 'Attachment', stamp: 'Stamp' }[f.type] || f.type;
 
 // Validates and formats one signer's submitted values. Returns { values } or { error }.
 function stageValues(doc, signer, input, signedAt, tz) {
@@ -638,6 +780,23 @@ function stageValues(doc, signer, input, signedAt, tz) {
       case 'radio':
         v = v === true || v === 'true' ? 'true' : 'false';
         break;
+      case 'stamp':
+        if (v && !isPng(v)) return { error: 'The stamp image could not be read. Please upload it again.' };
+        if (f.required && !v) return { error: `Please add your stamp${f.label ? ` ("${f.label}")` : ''}.` };
+        v = v || null;
+        break;
+      case 'attachment': {
+        const file = signer.pendingAttachments?.[f.id];
+        if (f.required && !file) return { error: `Please attach a file for "${f.label || 'Attachment'}".` };
+        v = file ? file.name : '';
+        break;
+      }
+      case 'note':
+        v = null; // instructions for the signer; nothing to fill in
+        break;
+      case 'formula':
+        v = ''; // calculated below, once every other value is known
+        break;
       default:
         if (f.required && !text) return { error: `Please fill in "${fieldName(f)}".` };
         v = text;
@@ -652,8 +811,41 @@ function stageValues(doc, signer, input, signedAt, tz) {
     if (picked > 1) return { error: `Choose only one option for "${name}".` };
     if (!picked && list.some((f) => f.required)) return { error: `Please choose an option for "${name}".` };
   }
+  // Formulas are always recalculated on the server; anything the browser sent is ignored.
+  // Fields are referenced by name, e.g. {Qty} * {Price}; two passes let formulas use other formulas.
+  const valueOf = (name) => {
+    const f = doc.fields.find((x) => (x.label || '').trim().toLowerCase() === name.toLowerCase());
+    return f ? (f.id in staged ? staged[f.id] : f.value) : '';
+  };
+  for (let pass = 0; pass < 2; pass++) {
+    for (const f of mine.filter((x) => x.type === 'formula')) staged[f.id] = Formula.calculate(f.formula, valueOf, f.decimals);
+  }
   return { values: staged };
 }
+
+// A signer uploads a file for an Attachment field before finishing. It is kept with the agreement
+// and embedded in the signed PDF.
+const attachmentUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
+app.post('/api/sign/:token/attachment/:fieldId', attachmentUpload.single('file'), (req, res) => {
+  const ctx = signerCtx(req, res);
+  if (!ctx) return;
+  const { doc, signer } = ctx;
+  const field = doc.fields.find((f) => f.id === req.params.fieldId && f.signerId === signer.id && f.type === 'attachment');
+  if (!field || doc.status !== 'sent' || signer.status === 'signed' || !activeSigners(doc).includes(signer)) return res.status(400).json({ error: 'You cannot attach a file now.' });
+  if (!req.file) return res.status(400).json({ error: 'Choose a file.' });
+  const ext = (req.file.originalname.split('.').pop() || '').toLowerCase();
+  if (!ATTACHMENT_TYPES[ext]) return res.status(400).json({ error: `Allowed files: ${Object.keys(ATTACHMENT_TYPES).join(', ').toUpperCase()}` });
+  const old = signer.pendingAttachments?.[field.id];
+  if (old && fs.existsSync(filePath(old.file))) fs.unlinkSync(filePath(old.file));
+  const file = `${id(9)}-att.${ext}`;
+  fs.writeFileSync(filePath(file), req.file.buffer);
+  const name = req.file.originalname.replace(/[^\w.\- ()]/g, '_').slice(0, 120);
+  const info = { file, name, size: req.file.size, mime: ATTACHMENT_TYPES[ext], sha256: sha256(req.file.buffer), at: now() };
+  signer.pendingAttachments = { ...(signer.pendingAttachments || {}), [field.id]: info };
+  log(doc, `File attached by ${who(signer)}: ${name}`, req, 'info', `${auditStamp(info.at)} - IP address: ${clientIp(req)} - Size: ${info.size} bytes - SHA-256: ${info.sha256}`);
+  store.save();
+  res.json({ name, size: info.size });
+});
 
 app.post('/api/sign/:token', async (req, res) => {
   const ctx = signerCtx(req, res);
@@ -679,8 +871,13 @@ app.post('/api/sign/:token', async (req, res) => {
     return res.status(400).json({ error: 'Your signature image could not be read. Please redraw it.' });
   }
 
-  for (const f of doc.fields) if (f.id in values && f.signerId === signer.id) f.value = values[f.id];
-  const appearance = req.body.appearance === 'TYPE' ? 'TYPE' : 'DRAW';
+  for (const f of doc.fields) {
+    if (!(f.id in values) || f.signerId !== signer.id) continue;
+    f.value = values[f.id];
+    if (f.type === 'attachment' && signer.pendingAttachments?.[f.id]) f.attachment = signer.pendingAttachments[f.id];
+  }
+  delete signer.pendingAttachments;
+  const appearance = ['TYPE', 'UPLOAD'].includes(req.body.appearance) ? req.body.appearance : 'DRAW';
   // Title and company for the signature stamp page; a Title/Company field on the document wins.
   const fieldValue = (type) => doc.fields.find((f) => f.signerId === signer.id && f.type === type && f.value)?.value;
   const title = String(fieldValue('title') || req.body.title || '').trim().slice(0, 120);
@@ -697,7 +894,7 @@ app.post('/api/sign/:token', async (req, res) => {
     ...(sigValue('signature') ? { signature: sigValue('signature') } : {}), ...(sigValue('initials') ? { initials: sigValue('initials') } : {}),
   });
   log(doc, `Document e-signed by ${who(signer)}`, req, 'signed',
-    `Signature Date: ${auditStamp(signer.signedAt)} - Time Source: server- IP address: ${signer.ip} - Signature Appearance Selected: ${appearance}${reason ? ` - Reason: ${reason}` : ''}`);
+    `Signature Date: ${auditStamp(signer.signedAt)} - Time Source: server- IP address: ${signer.ip} - Device: ${deviceOf(signer.userAgent)} - Authentication: personal one-time email link - Signature Appearance Selected: ${appearance}${reason ? ` - Reason: ${reason}` : ''}`);
 
   if (doc.signers.every((s) => s.status === 'signed')) {
     doc.completedAt = now();
@@ -706,6 +903,7 @@ app.post('/api/sign/:token', async (req, res) => {
     doc.finalFile = `${id(9)}-signed.pdf`;
     doc.finalHash = sha256(bytes);
     fs.writeFileSync(filePath(doc.finalFile), bytes);
+    fs.chmodSync(filePath(doc.finalFile), 0o444); // the signed original is never modified again
     store.save();
     const attachments = [{ filename: `${doc.title.replace(/[^\w.\- ]/g, '_')} - signed.pdf`, content: bytes }];
     for (const s of doc.signers) {
@@ -742,10 +940,17 @@ app.post('/api/sign/:token/decline', async (req, res) => {
 app.post('/api/verify', upload.single('file'), (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'Upload a PDF' });
   const hash = sha256(req.file.buffer);
+  // Embedded digital signatures are checked even when the file isn't in our records (e.g. edited).
+  let embedded = { signatures: [], certified: false };
+  try {
+    embedded = inspectSignatures(req.file.buffer, fs.readFileSync(CA.certFile, 'utf8'));
+  } catch (e) {
+    console.error('Signature inspection failed:', e.message);
+  }
   const doc = store.all().find((d) => d.finalHash === hash);
-  if (!doc) return res.json({ valid: false, hash });
+  if (!doc) return res.json({ valid: false, hash, embedded });
   res.json({
-    valid: true, hash, title: doc.title, agreementId: doc.agreementId, id: doc.transactionId || doc.id, completedAt: doc.completedAt,
+    valid: true, hash, embedded, title: doc.title, agreementId: doc.agreementId, id: doc.transactionId || doc.id, completedAt: doc.completedAt,
     signers: doc.signers.map((s) => ({ name: s.name, email: s.email, signedAt: s.signedAt, reason: s.reason })),
   });
 });

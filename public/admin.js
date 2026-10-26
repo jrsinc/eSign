@@ -57,7 +57,26 @@ function route() {
   actions.innerHTML = '';
   document.onkeydown = null;
   if (m) openDoc(m[1]);
+  else if (location.hash === '#/system-log') showSystemLog();
   else showList();
+}
+
+// Sign-ins, failed logins, discarded drafts and test emails, with the hash-chain check.
+async function showSystemLog() {
+  app.innerHTML = '<div class="wrap card">Loading…</div>';
+  const { integrity, entries } = await api('/api/system-log');
+  app.innerHTML = `
+    <div class="wrap">
+      <div class="card">
+        <h1>System audit log</h1>
+        <p class="muted small">Actions not tied to one agreement: sign-ins, failed sign-in attempts, discarded drafts, test emails. Each agreement's own audit trail is on its page.</p>
+        ${integrityHtml(integrity)}
+        <table>
+          <thead><tr><th>When</th><th>Who</th><th>What</th><th>IP / details</th></tr></thead>
+          <tbody>${entries.map((e) => `<tr><td class="small">${when(e.at)}</td><td class="small">${esc(e.actor || '')}</td><td>${esc(e.text)}</td><td class="small muted">${esc(e.ip || '')}${e.detail ? `<br>${esc(e.detail)}` : ''}</td></tr>`).join('') || '<tr><td colspan="4" class="muted">No entries yet.</td></tr>'}</tbody>
+        </table>
+      </div>
+    </div>`;
 }
 
 // ---------------- Document list ----------------
@@ -152,6 +171,8 @@ function newField(type, signerId, page, x, y, w, h, extra = {}) {
     label: '', dateFormat: 'MM/DD/YYYY',
     options: type === 'dropdown' ? ['Option 1', 'Option 2'] : [],
     group: type === 'radio' ? 'Group 1' : '',
+    formula: '', decimals: 2,
+    note: type === 'note' ? 'Please fill in all highlighted fields.' : '',
     style: { font: 'Helvetica', size: 'auto', color: '#000000', align: 'left' },
     ...extra,
   };
@@ -163,7 +184,9 @@ function showEditor(doc) {
   let selected = null;
   let pages = [];
   let saveTimer = null;
-  const open = { recipients: true, fields: true, message: false, settings: false };
+  const open = { recipients: true, fields: true, message: false, settings: false, comments: doc.comments.some((c) => !c.resolved) };
+  let pinning = false; // waiting for a click on the page to pin a comment
+  let pendingPin = null; // { page, x, y } chosen for the next comment
 
   actions.innerHTML = `
     <span id="saveState" class="small muted"></span>
@@ -262,7 +285,18 @@ function showEditor(doc) {
         <label class="check"><input type="checkbox" id="stampPage"> Add a signature page for every signer</label>
         <p class="small muted">After the document: each signer's signature, email, title and company.</p>
         <label class="check"><input type="checkbox" id="digitalSign"> Digitally sign with certificates</label>
-        <p class="small muted">Each signer gets a personal certificate and a cryptographic signature in the PDF, shown in Adobe's Signatures panel. <a href="/ca.cer">Root certificate</a></p>`);
+        <p class="small muted">Each signer gets a personal certificate and a cryptographic signature in the PDF, shown in Adobe's Signatures panel. <a href="/ca.cer">Root certificate</a></p>`) +
+      section('comments', `COMMENTS (${doc.comments.filter((c) => !c.resolved).length} open)`, `
+        <div id="commentList">${doc.comments.length ? doc.comments.map(commentHtml).join('') : '<p class="small muted">No comments yet. Discuss the draft with your team here before sending.</p>'}</div>
+        <label for="cAuthor">Your name</label>
+        <input id="cAuthor" value="${esc(authorName())}" placeholder="e.g. Pratik Shah">
+        <label for="cText">Comment</label>
+        <textarea id="cText" rows="3" placeholder="e.g. Please check the probe serial numbers on page 1"></textarea>
+        <div class="row" style="margin-top:8px;justify-content:space-between">
+          <button id="cPin" class="${pendingPin ? 'active' : ''}" title="Click, then click a spot on the document">📍 ${pendingPin ? `Pinned to page ${pendingPin.page + 1}` : 'Pin to page'}</button>
+          <button id="cAdd" class="primary">Add comment</button>
+        </div>
+        <p class="small muted">Comments are kept in the audit trail and can't be deleted. They become read-only once sent.</p>`);
 
     sb.querySelectorAll('[data-acc]').forEach((b) => (b.onclick = () => { open[b.dataset.acc] = !open[b.dataset.acc]; renderSidebar(); }));
     $('#order').value = doc.signingOrder;
@@ -275,6 +309,34 @@ function showEditor(doc) {
     $('#stampPage').onchange = (e) => { doc.stampPage = e.target.checked; scheduleSave(); };
     $('#digitalSign').checked = doc.digitalSign !== false;
     $('#digitalSign').onchange = (e) => { doc.digitalSign = e.target.checked; scheduleSave(); };
+    $('#cAuthor').oninput = (e) => { try { localStorage.setItem('esign.author', e.target.value); } catch {} };
+    $('#cPin').onclick = () => {
+      pinning = !pinning && !pendingPin;
+      pendingPin = null;
+      $('#viewer').classList.toggle('placing', pinning);
+      renderSidebar();
+      if (pinning) toast('Now click the spot on the document to pin your comment');
+    };
+    $('#cAdd').onclick = async () => {
+      const author = $('#cAuthor').value.trim();
+      const text = $('#cText').value.trim();
+      try {
+        const c = await api(`/api/documents/${doc.id}/comments`, { method: 'POST', body: { author, text, ...(pendingPin || {}) } });
+        doc.comments.push(c);
+        pendingPin = null;
+        renderSidebar();
+        renderFields();
+        toast('Comment added');
+      } catch (e) { toast(e.message); }
+    };
+    sb.querySelectorAll('[data-resolve]').forEach((b) => (b.onclick = async () => {
+      const c = doc.comments.find((x) => x.id === b.dataset.resolve);
+      try {
+        Object.assign(c, await api(`/api/documents/${doc.id}/comments/${c.id}/resolve`, { method: 'POST', body: { author: $('#cAuthor').value.trim(), resolved: !c.resolved } }));
+        renderSidebar();
+        renderFields();
+      } catch (e) { toast(e.message); }
+    }));
     $('#title').oninput = (e) => { doc.title = e.target.value; scheduleSave(); };
     $('#subject').oninput = (e) => { doc.emailSubject = e.target.value; scheduleSave(); };
     $('#msg').oninput = (e) => { doc.message = e.target.value; scheduleSave(); };
@@ -373,7 +435,7 @@ function showEditor(doc) {
   function renderCustomize(f) {
     const sb = $('#sidebar');
     const st = f.style;
-    const auto = ['date', 'name', 'email'].includes(f.type);
+    const auto = ['date', 'name', 'email', 'formula', 'note'].includes(f.type);
     sb.innerHTML = `
       <div class="row" style="margin-bottom:12px"><button class="ghost" id="backBtn">‹</button><h2 style="margin:0">Customize field</h2></div>
       <h3>Field assigned to</h3>
@@ -393,6 +455,20 @@ function showEditor(doc) {
           <option value="digital">Digital ID stamp (like Adobe)</option>
         </select>
         <p class="small muted">Digital ID stamp: the name large on the left; "Digitally signed by", DN, reason and date on the right.</p>` : ''}
+      ${f.type === 'formula' ? `
+        <label for="cfFormula">Formula</label>
+        <input id="cfFormula" value="${esc(f.formula)}" placeholder="{Qty} * {Price}" style="font-family:Consolas,monospace">
+        <div id="cfFormulaMsg" class="small"></div>
+        <p class="small muted">Use field names in braces with + - * / and ( ). Calculated automatically; the signer can't change it.
+          ${(() => { const names = [...new Set(doc.fields.filter((x) => ['number', 'formula'].includes(x.type) && x.label && x.id !== f.id).map((x) => x.label))]; return names.length ? `<br>Number fields: ${names.map((n) => `<code>{${esc(n)}}</code>`).join(' ')}` : '<br>Give your Number fields a name first, e.g. Qty.'; })()}</p>
+        <label for="cfDecimals">Decimal places</label>
+        <select id="cfDecimals">${[0, 1, 2, 3, 4].map((n) => `<option>${n}</option>`).join('')}</select>` : ''}
+      ${f.type === 'note' ? `
+        <label for="cfNote">Note text for the signer</label>
+        <textarea id="cfNote" rows="4">${esc(f.note)}</textarea>
+        <p class="small muted">Shown to the signer as guidance. Not printed on the signed document.</p>` : ''}
+      ${f.type === 'attachment' ? '<p class="small muted">The signer uploads a file (PDF, image, Word, Excel, text, CSV; max 10 MB). It is embedded in the signed PDF and covered by the signatures.</p>' : ''}
+      ${f.type === 'stamp' ? '<p class="small muted">The signer uploads their company stamp or seal image, placed in this box.</p>' : ''}
       ${f.type === 'radio' ? `
         <label for="cfGroup">Radio group</label>
         <input id="cfGroup" value="${esc(f.group)}">
@@ -400,7 +476,7 @@ function showEditor(doc) {
       ${f.type === 'dropdown' ? `
         <label for="cfOptions">Options (one per line)</label>
         <textarea id="cfOptions" rows="4">${esc(f.options.join('\n'))}</textarea>` : ''}
-      ${auto ? '<p class="small muted">Filled in automatically when the recipient signs.</p>' : `
+      ${auto ? (f.type === 'note' ? '' : '<p class="small muted">Filled in automatically when the recipient signs.</p>') : `
         <label class="check"><input type="checkbox" id="cfReq" ${f.required ? 'checked' : ''}> Required</label>`}
       ${TEXT_LIKE.includes(f.type) || f.type === 'checkbox' || f.type === 'radio' ? `
         <h3 style="margin-top:16px">Text format</h3>
@@ -431,6 +507,18 @@ function showEditor(doc) {
     };
     if ($('#cfDate')) { $('#cfDate').value = f.dateFormat; $('#cfDate').onchange = (e) => { f.dateFormat = e.target.value; changed(); }; }
     $('#cfName').oninput = (e) => { f.label = e.target.value; changed(); };
+    if ($('#cfFormula')) {
+      const showCheck = () => {
+        const problem = Formula.check(f.formula);
+        $('#cfFormulaMsg').textContent = f.formula ? (problem ? `⚠ ${problem}` : '✓ Formula looks good') : '';
+        $('#cfFormulaMsg').style.color = problem ? 'var(--danger)' : 'var(--ok)';
+      };
+      $('#cfFormula').oninput = (e) => { f.formula = e.target.value; showCheck(); changed(); };
+      $('#cfDecimals').value = String(f.decimals ?? 2);
+      $('#cfDecimals').onchange = (e) => { f.decimals = Number(e.target.value); changed(); };
+      showCheck();
+    }
+    if ($('#cfNote')) $('#cfNote').oninput = (e) => { f.note = e.target.value; changed(); };
     if ($('#cfAppearance')) { $('#cfAppearance').value = f.appearance || 'standard'; $('#cfAppearance').onchange = (e) => { f.appearance = e.target.value; changed(); }; }
     if ($('#cfGroup')) $('#cfGroup').oninput = (e) => { f.group = e.target.value; changed(); };
     if ($('#cfOptions')) $('#cfOptions').oninput = (e) => { f.options = e.target.value.split('\n').map((s) => s.trim()).filter(Boolean); changed(); };
@@ -490,12 +578,44 @@ function showEditor(doc) {
     pages.forEach((p, pi) => {
       p.layer.innerHTML = '';
       doc.fields.filter((f) => f.page === pi).forEach((f) => p.layer.append(fieldEl(f, p)));
+      // Comment pins: click one to jump to its comment.
+      doc.comments.filter((c) => c.page === pi).forEach((c, n) => {
+        const pin = document.createElement('div');
+        pin.className = `pin${c.resolved ? ' resolved' : ''}`;
+        pin.style.left = `${c.x * 100}%`;
+        pin.style.top = `${c.y * 100}%`;
+        pin.textContent = '💬';
+        pin.title = `${c.author}: ${c.text}`;
+        pin.onpointerdown = (e) => {
+          e.stopPropagation();
+          open.comments = true;
+          selected = null;
+          renderSidebar();
+          const el = document.querySelector(`[data-comment="${c.id}"]`);
+          el?.scrollIntoView({ block: 'center' });
+          el?.classList.add('flash');
+          setTimeout(() => el?.classList.remove('flash'), 1500);
+        };
+        p.layer.append(pin);
+      });
+      if (pendingPin?.page === pi) {
+        const pin = document.createElement('div');
+        pin.className = 'pin';
+        pin.style.left = `${pendingPin.x * 100}%`;
+        pin.style.top = `${pendingPin.y * 100}%`;
+        pin.textContent = '📍';
+        p.layer.append(pin);
+      }
     });
   }
 
   function fieldText(f) {
     if (f.type === 'checkbox' || f.type === 'radio') return '';
     if (f.type === 'signature' && f.appearance === 'digital') return 'Digital ID stamp';
+    if (f.type === 'formula') return `= ${f.formula || 'formula'}`;
+    if (f.type === 'note') return `🗒 ${f.note || 'Note'}`;
+    if (f.type === 'attachment') return `📎 ${f.label || 'Attachment'}`;
+    if (f.type === 'stamp') return `🔏 ${f.label || 'Stamp'}`;
     if (f.type === 'date') return `${FIELD_TYPES.date.label} (${f.dateFormat.toLowerCase()})`;
     if (f.type === 'datefield') return `${f.label || 'Date'} (${f.dateFormat.toLowerCase()})`;
     if (f.type === 'dropdown') return `${f.label || 'Select'} ▾`;
@@ -605,6 +725,18 @@ function showEditor(doc) {
     pages.forEach((p, pi) => {
       p.layer.onpointerdown = (e) => {
         hideCtx();
+        if (pinning) {
+          const rect = p.layer.getBoundingClientRect();
+          pendingPin = { page: pi, x: (e.clientX - rect.left) / rect.width, y: (e.clientY - rect.top) / rect.height };
+          pinning = false;
+          $('#viewer').classList.remove('placing');
+          open.comments = true;
+          selected = null;
+          renderFields();
+          renderSidebar();
+          $('#cText')?.focus();
+          return;
+        }
         const hadSelection = !!selected;
         selected = null;
         p.layer.querySelectorAll('.field').forEach((x) => x.classList.remove('sel'));
@@ -746,6 +878,24 @@ async function showOrganizer(doc) {
   render();
 }
 
+const authorName = () => { try { return localStorage.getItem('esign.author') || ''; } catch { return ''; } };
+
+function commentHtml(c, readOnly) {
+  return `<div class="comment${c.resolved ? ' resolved' : ''}" data-comment="${c.id}">
+    <div class="meta"><strong>${esc(c.author)}</strong> · ${when(c.at)}${c.page != null ? ` · 📍 page ${c.page + 1}` : ''}${c.resolved ? ` · ✓ resolved by ${esc(c.resolvedBy || '')}` : ''}</div>
+    <div style="white-space:pre-wrap;margin-top:3px">${esc(c.text)}</div>
+    ${readOnly ? '' : `<button class="ghost small" data-resolve="${c.id}" style="padding:3px 0">${c.resolved ? 'Reopen' : '✓ Resolve'}</button>`}
+  </div>`;
+}
+
+// Hash-chain check result shown above every audit trail.
+function integrityHtml(r) {
+  if (!r) return '';
+  return r.ok
+    ? `<p class="small chain-ok">✓ Audit trail intact: ${r.checked} entr${r.checked === 1 ? 'y' : 'ies'} verified by SHA-256 hash chain${r.unsealed ? ` (${r.unsealed} older entr${r.unsealed === 1 ? 'y' : 'ies'} from before sealing)` : ''}.</p>`
+    : `<p class="small chain-bad">✗ AUDIT TRAIL TAMPERED: ${esc(r.reason)} (entry ${r.brokenAt + 1}).</p>`;
+}
+
 const statusLabel = (s) => ({ voided: 'cancelled', sent: 'out for signature' }[s] || s);
 
 function cancelAgreement(doc) {
@@ -805,6 +955,7 @@ function showDetail(doc) {
           <p class="small muted" style="margin:10px 0 0">Transaction ID: ${esc(doc.transactionId || doc.id)}<br>Sent ${when(doc.sentAt)}${done ? `<br>Completed ${when(doc.completedAt)}` : ''}
           ${doc.status === 'voided' ? `<br>Cancelled ${when(doc.cancelledAt)}${doc.cancelReason ? `<br>Reason: ${esc(doc.cancelReason)}` : ''}` : ''}
           ${doc.status === 'sent' ? `<br>Reminders: ${REMINDER_LABELS[doc.reminder || 'none']}` : ''}</p>
+          ${done && doc.locked ? `<div class="locked">🔒 <strong>Locked.</strong> Certified by ${esc(me.company)} eSign: no changes allowed. Any edit breaks the signatures.</div>` : ''}
           ${done ? `<p class="small muted" style="word-break:break-all">Signed file SHA-256:<br>${doc.finalHash}</p>` : ''}
         </section>
         <section>
@@ -827,8 +978,13 @@ function showDetail(doc) {
         </section>
         <section style="border:none">
           <h3>Audit trail</h3>
-          <ul class="events">${doc.events.slice().reverse().map((e) => `<li><span class="muted small">${when(e.at)}</span><br>${esc(e.text)}${e.detail ? `<br><span class="small muted">${esc(e.detail)}</span>` : ''}</li>`).join('')}</ul>
+          ${integrityHtml(doc.auditIntegrity)}
+          <ul class="events">${doc.events.slice().reverse().map((e) => `<li><span class="muted small">${when(e.at)}${e.actor ? ` · ${esc(e.actor)}` : ''}</span><br>${esc(e.text)}${e.detail ? `<br><span class="small muted">${esc(e.detail)}</span>` : ''}</li>`).join('')}</ul>
         </section>
+        ${doc.comments?.length ? `<section style="border:none">
+          <h3>Comments before sending (${doc.comments.length})</h3>
+          ${doc.comments.map((c) => commentHtml(c, true)).join('')}
+        </section>` : ''}
       </aside>
       <div class="viewer"><div class="pages" id="pages"></div></div>
     </div>`;

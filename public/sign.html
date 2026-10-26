@@ -29,7 +29,12 @@
   <div id="modal" class="modal-bg hidden">
     <div class="modal">
       <h2 id="modalTitle">Adopt your signature</h2>
-      <div class="tabs"><button data-tab="saved" class="hidden">Saved</button><button data-tab="draw" class="active">Draw</button><button data-tab="type">Type</button></div>
+      <div class="tabs"><button data-tab="saved" class="hidden">Saved</button><button data-tab="draw" class="active">Draw</button><button data-tab="type">Type</button><button data-tab="upload">Upload</button></div>
+      <div data-pane="upload" class="hidden">
+        <input type="file" id="sigFile" accept="image/png,image/jpeg">
+        <p class="small muted" style="margin:6px 0">A photo or scan of your signature on white paper works best. The white background is removed automatically.</p>
+        <div class="typed-preview" style="font-size:14px"><img id="sigFilePreview" alt="" style="max-height:110px;max-width:100%"></div>
+      </div>
       <div data-pane="saved" class="hidden">
         <p class="small muted" style="margin:0 0 8px">You used this before. Check it is yours, then use it, or switch to Draw or Type to make a new one.</p>
         <div class="typed-preview" style="font-size:16px"><img id="savedImg" alt="Saved signature" style="max-height:100px;max-width:100%"></div>
@@ -73,6 +78,7 @@
   </div>
 
   <script src="/vendor/pdfjs/pdf.min.js"></script>
+  <script src="/formula.js"></script>
   <script src="/common.js"></script>
   <script src="/sign.js"></script>
 </body>
