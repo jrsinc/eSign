@@ -83,7 +83,8 @@ app.post('/api/login', (req, res) => {
   const sid = id(24);
   sessions.set(sid, { expires: Date.now() + 12 * 3600 * 1000 });
   saveSessions();
-  res.cookie('sid', sid, { httpOnly: true, sameSite: 'lax', secure: BASE_URL.startsWith('https') });
+  // HTTPS-only when the visitor came in over HTTPS (e.g. through ngrok), so local http:// access still works.
+  res.cookie('sid', sid, { httpOnly: true, sameSite: 'lax', secure: req.secure });
   res.json({ ok: true });
 });
 app.post('/api/logout', (req, res) => {
