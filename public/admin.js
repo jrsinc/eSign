@@ -30,6 +30,29 @@ async function boot() {
   }
 }
 
+// Every password box gets a Show / Hide button, wherever it appears (sign-in, setup, change password).
+function addPasswordToggle(input) {
+  if (input.closest('.pw-wrap')) return;
+  const wrap = document.createElement('span');
+  wrap.className = 'pw-wrap';
+  input.replaceWith(wrap);
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'pw-toggle';
+  btn.textContent = 'Show';
+  btn.setAttribute('aria-label', 'Show password');
+  btn.onclick = () => {
+    const show = input.type === 'password';
+    input.type = show ? 'text' : 'password';
+    btn.textContent = show ? 'Hide' : 'Show';
+    btn.setAttribute('aria-label', show ? 'Hide password' : 'Show password');
+    input.focus();
+  };
+  wrap.append(input, btn);
+}
+new MutationObserver(() => document.querySelectorAll('input[type=password]').forEach(addPasswordToggle))
+  .observe(document.body, { childList: true, subtree: true });
+
 // Any request that finds the session gone (signed out after inactivity, disabled, …) returns to sign-in.
 window.onUnauthorized = (message) => {
   if (!me) return;
@@ -207,7 +230,7 @@ async function showUsers(notice = '') {
     <div class="wrap" style="max-width:1200px">
       <div class="card" style="margin-bottom:16px">
         <h1>Users</h1>
-        <p class="muted small">Only administrators add users and set passwords. Each person signs in with their email, the password you give them, and a code emailed to them. Users can't change their own password; they ask you. Users are never deleted, only deactivated, so the audit trail always shows who did what.</p>
+        <p class="muted small">Only administrators add users and set passwords. When you add someone, we email them their sign-in ID (their email) and password. They sign in with both, plus a code emailed to them each time. Users can't change their own password; they ask you. Users are never deleted, only deactivated, so the audit trail always shows who did what.</p>
         <form id="addUser">
           <div class="row" style="flex-wrap:wrap;align-items:flex-end">
             <div style="flex:1;min-width:160px"><label for="uName">Full name</label><input id="uName" required></div>
@@ -236,6 +259,7 @@ async function showUsers(notice = '') {
               <td class="small">${permBox(u, 'viewAudit', 'View')}${permBox(u, 'downloadAudit', 'Download')}</td>
               <td class="small muted">${u.lastLoginAt ? when(u.lastLoginAt) : '—'}</td>
               <td class="small" style="white-space:nowrap">
+                <button class="ghost small" data-edit>Edit</button>
                 <button class="ghost small" data-act="set-password">Set new password</button>
                 ${u.lockedUntil && Date.parse(u.lockedUntil) > Date.now() ? '<button class="ghost small" data-act="unlock">Unlock</button>' : ''}
                 ${u.id === me.user.id ? '' : u.status === 'disabled' ? '<button class="ghost small" data-act="enable">Reactivate</button>' : '<button class="ghost small danger" data-act="disable">Deactivate</button>'}
@@ -245,12 +269,12 @@ async function showUsers(notice = '') {
       </div>
     </div>`;
 
-  // A password is shown once, only here, for the administrator to give to the person privately.
-  const showPassword = (user, password) => `
+  // A password is shown once, only here. New users also get it in their welcome email.
+  const showPassword = (user, password, emailed) => `
     <div class="card" style="margin-top:14px;border-color:#fde68a;background:#fffbeb">
       <strong>Password for ${esc(user.name)} (${esc(user.email)})</strong>
       <div class="linkbox"><input readonly value="${esc(password)}" style="font-family:Consolas,monospace;font-size:15px"><button data-copy-pw>Copy</button></div>
-      <p class="small muted" style="margin:6px 0 0">Shown only now: it is stored scrambled and can't be displayed again. Give it to the person privately (not in the same email as their sign-in ID). If it's lost, set a new one.</p>
+      <p class="small muted" style="margin:6px 0 0">${emailed ? `We've emailed the sign-in ID and this password to ${esc(user.email)}. ` : 'Give it to the person privately. '}Shown only now: it is stored scrambled and can't be displayed again. If it's lost, set a new one.</p>
     </div>`;
   const bindCopy = (password) => $('[data-copy-pw]')?.addEventListener('click', () => navigator.clipboard.writeText(password).then(() => toast('Password copied')));
 
@@ -264,9 +288,9 @@ async function showUsers(notice = '') {
         name: $('#uName').value, email: $('#uEmail').value, role: $('#uRole').value,
         password: $('#uPw').value, generate, permissions: { viewAudit: $('#uView').checked, downloadAudit: $('#uDownload').checked },
       } });
-      await showUsers(showPassword(r.user, r.password));
+      await showUsers(showPassword(r.user, r.password, true));
       bindCopy(r.password);
-      toast(`${r.user.name} added`);
+      toast(`${r.user.name} added and emailed their sign-in details`);
     } catch (err) { toast(err.message, 5000); }
   };
 
@@ -287,6 +311,35 @@ async function showUsers(notice = '') {
         toast('Access updated');
       } catch (err) { toast(err.message, 4000); showUsers(); }
     }));
+    tr.querySelector('[data-edit]').onclick = () => {
+      const bg = document.createElement('div');
+      bg.className = 'modal-bg';
+      bg.innerHTML = `
+        <div class="modal" style="max-width:420px">
+          <h2>Edit user</h2>
+          <label for="euName">Full name</label>
+          <input id="euName" value="${esc(u.name)}">
+          <label for="euEmail">Email (sign-in ID)</label>
+          <input id="euEmail" type="email" value="${esc(u.email)}">
+          <p class="small muted">If you change the email, they sign in with the new one from now on, keeping the same password. We email both the old and new address. Agreements already sent keep the details recorded at the time.</p>
+          <div class="row end" style="margin-top:12px"><button id="euCancel">Cancel</button><button id="euSave" class="primary">Save</button></div>
+        </div>`;
+      document.body.append(bg);
+      $('#euName').focus();
+      $('#euCancel').onclick = () => bg.remove();
+      $('#euSave').onclick = async () => {
+        try {
+          const r = await api(`/api/users/${uid}/details`, { method: 'POST', body: { name: $('#euName').value, email: $('#euEmail').value } });
+          bg.remove();
+          if (uid === me.user.id) {
+            me.user = { ...me.user, name: r.user.name, email: r.user.email };
+            $('#account').textContent = `👤 ${me.user.name}`;
+          }
+          await showUsers();
+          toast('User details saved');
+        } catch (err) { toast(err.message, 5000); }
+      };
+    };
     tr.querySelectorAll('[data-act]').forEach((b) => (b.onclick = async () => {
       const act = b.dataset.act;
       let body = {};

@@ -318,11 +318,11 @@ app.post('/api/users', requireUser, requireAdminRole, async (req, res) => {
   const permissions = Object.fromEntries(PERMISSIONS.map((p) => [p, !!req.body.permissions?.[p]]));
   const user = { id: id(8), email, name, role, status: 'active', passwordHash: authLib.hashPassword(pw.password), permissions, createdAt: now(), createdBy: req.user.id, failed: 0 };
   store.addUser(user);
-  sysLog(req, 'user', `User created: ${actorOf(user)} as ${role}`, `Permissions: ${PERMISSIONS.filter((p) => permissions[p]).join(', ') || 'none'}. Password set by ${req.user.name}.`);
-  // Tell the person they have an account, without the password (the administrator gives it to them).
+  sysLog(req, 'user', `User created: ${actorOf(user)} as ${role}`, `Permissions: ${PERMISSIONS.filter((p) => permissions[p]).join(', ') || 'none'}. Password set by ${req.user.name} and emailed to the user.`);
+  // Welcome email with the sign-in ID and password. Signing in also needs the one-time code we email each time.
   mailer.send({
     to: email, subject: `Your ${COMPANY} eSign account`, heading: `Welcome to ${COMPANY} eSign`,
-    text: `Hello ${name},\n\n${req.user.name} has created an account for you.\nYour sign-in ID is: ${email}\n\nYour administrator will give you your password. When you sign in, we will also email you a one-time code.`,
+    text: `Hello ${name},\n\n${req.user.name} has created an account for you.\n\nSign-in ID: ${email}\nPassword: ${pw.password}\n\nWhen you sign in, we will also email you a one-time code. Keep your password private and delete this email once you have noted it. Only your administrator can change your password.`,
     link: BASE_URL, linkLabel: 'OPEN ESIGN',
   }).catch((e) => console.error('Mail error:', e.message));
   res.json({ user: publicUser(user), password: pw.password });
@@ -379,6 +379,32 @@ app.post('/api/users/:id/:action', requireUser, requireAdminRole, async (req, re
       if (user.status === 'invited') user.status = 'active';
       if (!self) signOut(); // a new password signs the person out everywhere
       sysLog(req, 'password', `New password set for ${actorOf(user)} by ${req.user.name}`);
+      break;
+    }
+    case 'details': {
+      // Name and email (the sign-in ID). Agreements already sent keep the name and email recorded at the time.
+      const name = String(req.body.name || '').trim().slice(0, 120);
+      const email = String(req.body.email || '').trim().toLowerCase();
+      if (!name) return res.status(400).json({ error: 'Please enter the person\'s name.' });
+      if (!isEmail(email)) return res.status(400).json({ error: 'Please enter a valid email address.' });
+      const other = store.getUserByEmail(email);
+      if (other && other.id !== user.id) return res.status(400).json({ error: 'Another user already has this email. Each person has one account.' });
+      const changes = [];
+      if (name !== user.name) changes.push(`name "${user.name}" → "${name}"`);
+      if (email !== user.email) changes.push(`email ${user.email} → ${email}`);
+      if (!changes.length) break;
+      const oldEmail = user.email;
+      sysLog(req, 'user', `Details of ${actorOf(user)} changed: ${changes.join(', ')}`);
+      user.name = name;
+      user.email = email;
+      if (email !== oldEmail) {
+        // Tell both addresses, so the person notices if the change wasn't expected.
+        const text = `Hello ${name},\n\n${req.user.name} changed your ${COMPANY} eSign sign-in ID from ${oldEmail} to ${email}.\n\nFrom now on, sign in with ${email} and your existing password. Your sign-in codes will be sent to ${email}.\n\nIf you didn't expect this, contact your administrator.`;
+        for (const to of [oldEmail, email]) {
+          mailer.send({ to, subject: `Your ${COMPANY} eSign sign-in ID has changed`, heading: 'Sign-in ID changed', text, link: BASE_URL, linkLabel: 'OPEN ESIGN' })
+            .catch((e) => console.error('Mail error:', e.message));
+        }
+      }
       break;
     }
     default:
