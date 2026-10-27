@@ -20,6 +20,7 @@ const { PDFDocument, degrees } = require('pdf-lib');
 const { loadOrCreateCA, issueSignerCertificate } = require('./lib/pki');
 const Formula = require('./public/formula.js');
 const audit = require('./lib/audit');
+const authLib = require('./lib/auth');
 const { inspectSignatures } = require('./lib/verifysig');
 
 const PORT = Number(process.env.PORT || 3000);
@@ -82,50 +83,339 @@ function deviceOf(ua = '') {
   return `${browser} on ${os}`;
 }
 
-// ---------- Admin auth (sessions survive restarts) ----------
+// ---------- User accounts and sign-in ----------
+// Every person signs in with their own email address and password, then a one-time code emailed to
+// them (two-step sign-in). Roles: "admin" (also manages users) and "sender" (prepares and sends).
+const SESSION_HOURS = 12;
+const IDLE_MINUTES = Number(process.env.SESSION_IDLE_MINUTES || 30);
+const LOCK_AFTER = 5; // wrong passwords in a row
+const LOCK_MINUTES = 15;
+const OTP_MINUTES = 10;
+const ROLES = ['admin', 'sender'];
+
 const SESSIONS_FILE = path.join(store.DATA_DIR, 'sessions.json');
 const sessions = new Map(fs.existsSync(SESSIONS_FILE) ? Object.entries(JSON.parse(fs.readFileSync(SESSIONS_FILE, 'utf8'))) : []);
 const saveSessions = () => {
-  for (const [k, s] of sessions) if (s.expires < Date.now()) sessions.delete(k);
+  for (const [k, s] of sessions) if (s.expires < Date.now() || !s.userId) sessions.delete(k);
   fs.writeFileSync(SESSIONS_FILE, JSON.stringify(Object.fromEntries(sessions)));
 };
-function requireAdmin(req, res, next) {
+const challenges = new Map(); // pending two-step sign-ins: id -> { userId, codeHash, expires, attempts, sentAt }
+const publicUser = (u) => ({ id: u.id, email: u.email, name: u.name, role: u.role, status: u.status, createdAt: u.createdAt, lastLoginAt: u.lastLoginAt, lockedUntil: u.lockedUntil });
+const actorOf = (u) => `${u.name} (${u.email})`;
+
+function requireUser(req, res, next) {
   const s = sessions.get(req.cookies.sid);
-  if (!s || s.expires < Date.now()) return res.status(401).json({ error: 'Not logged in' });
-  req.actor = 'Administrator';
+  const user = s && store.getUser(s.userId);
+  const idle = s && Date.now() - (s.lastSeen || 0) > IDLE_MINUTES * 60000;
+  if (!s || !user || s.expires < Date.now() || idle || user.status !== 'active') {
+    if (s && idle && user) {
+      req.actor = actorOf(user);
+      sysLog(req, 'logout', `${user.name} signed out automatically after ${IDLE_MINUTES} minutes without activity`);
+    }
+    if (s) sessions.delete(req.cookies.sid);
+    return res.status(401).json({ error: idle ? 'Signed out after inactivity. Please sign in again.' : 'Not logged in' });
+  }
+  if (Date.now() - (s.lastSeen || 0) > Math.min(60000, (IDLE_MINUTES * 60000) / 4)) {
+    s.lastSeen = Date.now();
+    saveSessions();
+  }
+  req.user = user;
+  req.actor = actorOf(user);
   next();
 }
+const requireAdminRole = (req, res, next) => (req.user.role === 'admin' ? next() : res.status(403).json({ error: 'Only administrators can do this.' }));
 
-app.post('/api/login', (req, res) => {
+// Simple per-IP brake on sign-in attempts (20 per 15 minutes).
+const attemptsByIp = new Map();
+function tooManyAttempts(req) {
+  const ip = clientIp(req);
+  const recent = (attemptsByIp.get(ip) || []).filter((t) => Date.now() - t < 15 * 60000);
+  recent.push(Date.now());
+  attemptsByIp.set(ip, recent);
+  return recent.length > 20;
+}
+
+async function sendOtp(user, challengeId, req) {
+  const code = authLib.newOtp();
+  challenges.set(challengeId, { userId: user.id, codeHash: authLib.hashSecret(code, challengeId), expires: Date.now() + OTP_MINUTES * 60000, attempts: 0, sentAt: Date.now() });
+  await mailer.send({
+    to: user.email,
+    subject: `${COMPANY} eSign sign-in code`,
+    heading: 'Your sign-in code',
+    text: `Hello ${user.name},\n\nYour one-time sign-in code is:\n\n${code}\n\nIt expires in ${OTP_MINUTES} minutes and can be used once.\nIf you did not try to sign in, someone may know your password: change it and tell your administrator.`,
+  });
+  sysLog(req, 'otp', `Sign-in code emailed to ${user.email}`);
+}
+
+app.get('/api/auth/status', (req, res) => res.json({ company: COMPANY, setupRequired: store.users().length === 0, mail: mailer.enabled() }));
+
+// First-time setup: the .env ADMIN_PASSWORD proves ownership once, to create the first administrator.
+app.post('/api/auth/setup', (req, res) => {
+  if (store.users().length) return res.status(400).json({ error: 'Setup is already done. Please sign in.' });
   const digest = (s) => crypto.createHash('sha256').update(String(s)).digest();
-  const ok = typeof req.body.password === 'string' && crypto.timingSafeEqual(digest(req.body.password), digest(ADMIN_PASSWORD));
-  if (!ok) {
-    sysLog(req, 'login_failed', 'Failed sign-in attempt (wrong password)', `Device: ${deviceOf(req.headers['user-agent'])}`);
-    return res.status(401).json({ error: 'Wrong password' });
+  if (typeof req.body.adminPassword !== 'string' || !crypto.timingSafeEqual(digest(req.body.adminPassword), digest(ADMIN_PASSWORD))) {
+    sysLog(req, 'login_failed', 'First-time setup attempted with a wrong setup password');
+    return res.status(401).json({ error: 'The setup password (ADMIN_PASSWORD in .env) is wrong.' });
   }
+  const name = String(req.body.name || '').trim().slice(0, 120);
+  const email = String(req.body.email || '').trim().toLowerCase();
+  if (!name) return res.status(400).json({ error: 'Please enter your name.' });
+  if (!isEmail(email)) return res.status(400).json({ error: 'Please enter a valid email address.' });
+  const problem = authLib.passwordProblem(req.body.password, { email, name });
+  if (problem) return res.status(400).json({ error: problem });
+  const user = { id: id(8), email, name, role: 'admin', status: 'active', passwordHash: authLib.hashPassword(req.body.password), createdAt: now(), failed: 0 };
+  store.addUser(user);
+  req.actor = actorOf(user);
+  sysLog(req, 'user', `First administrator account created: ${actorOf(user)}`);
+  res.json({ ok: true });
+});
+
+// Step 1: email + password. The same answer is given whether the email or the password is wrong.
+app.post('/api/login', async (req, res) => {
+  if (tooManyAttempts(req)) return res.status(429).json({ error: 'Too many attempts. Please wait 15 minutes and try again.' });
+  const email = String(req.body.email || '').trim().toLowerCase();
+  const user = store.getUserByEmail(email);
+  const wrong = () => res.status(401).json({ error: 'Email or password is incorrect.' });
+  if (!user || user.status === 'invited' || !user.passwordHash) {
+    sysLog(req, 'login_failed', `Failed sign-in for ${email || '(no email)'}: unknown or not activated account`);
+    return wrong();
+  }
+  if (user.status === 'disabled') {
+    sysLog(req, 'login_failed', `Sign-in refused for disabled account ${email}`);
+    return wrong();
+  }
+  if (user.lockedUntil && Date.parse(user.lockedUntil) > Date.now()) {
+    sysLog(req, 'login_failed', `Sign-in refused for locked account ${email}`);
+    return res.status(423).json({ error: `This account is locked after too many wrong passwords. Try again after ${new Date(user.lockedUntil).toLocaleTimeString()}, or ask an administrator.` });
+  }
+  if (!authLib.verifyPassword(req.body.password, user.passwordHash)) {
+    user.failed = (user.failed || 0) + 1;
+    if (user.failed >= LOCK_AFTER) {
+      user.lockedUntil = new Date(Date.now() + LOCK_MINUTES * 60000).toISOString();
+      user.failed = 0;
+      sysLog(req, 'lockout', `Account ${email} locked for ${LOCK_MINUTES} minutes after ${LOCK_AFTER} wrong passwords`);
+    } else {
+      sysLog(req, 'login_failed', `Wrong password for ${email} (${user.failed} of ${LOCK_AFTER})`, `Device: ${deviceOf(req.headers['user-agent'])}`);
+    }
+    store.save();
+    return wrong();
+  }
+  user.failed = 0;
+  user.lockedUntil = undefined;
+  store.save();
+  const challenge = id(18);
+  req.actor = actorOf(user);
+  try {
+    await sendOtp(user, challenge, req);
+  } catch (e) {
+    console.error('Mail error:', e.message);
+    return res.status(503).json({ error: 'Your sign-in code could not be emailed. Please try again shortly.' });
+  }
+  res.json({ challenge, sentTo: authLib.maskEmail(user.email), minutes: OTP_MINUTES });
+});
+
+// Step 2: the emailed code.
+app.post('/api/login/verify', (req, res) => {
+  const c = challenges.get(String(req.body.challenge || ''));
+  if (!c || c.expires < Date.now()) return res.status(400).json({ error: 'This code has expired. Please sign in again.', restart: true });
+  const user = store.getUser(c.userId);
+  req.actor = user ? actorOf(user) : 'System';
+  const code = String(req.body.code || '').replace(/\D/g, '');
+  if (!user || user.status !== 'active') return res.status(400).json({ error: 'Please sign in again.', restart: true });
+  if (!authLib.sameHash(authLib.hashSecret(code, req.body.challenge), c.codeHash)) {
+    c.attempts++;
+    sysLog(req, 'login_failed', `Wrong sign-in code for ${user.email} (${c.attempts} of 5)`);
+    if (c.attempts >= 5) {
+      challenges.delete(req.body.challenge);
+      return res.status(400).json({ error: 'Too many wrong codes. Please sign in again.', restart: true });
+    }
+    return res.status(400).json({ error: 'That code is not correct.' });
+  }
+  challenges.delete(req.body.challenge);
   const sid = id(24);
-  sessions.set(sid, { expires: Date.now() + 12 * 3600 * 1000 });
+  sessions.set(sid, { userId: user.id, expires: Date.now() + SESSION_HOURS * 3600000, lastSeen: Date.now() });
   saveSessions();
-  req.actor = 'Administrator';
-  sysLog(req, 'login', 'Administrator signed in', `Device: ${deviceOf(req.headers['user-agent'])}`);
+  user.lastLoginAt = now();
+  store.save();
+  sysLog(req, 'login', `${user.name} signed in (password + emailed code)`, `Device: ${deviceOf(req.headers['user-agent'])}`);
   // HTTPS-only when the visitor came in over HTTPS (e.g. through ngrok), so local http:// access still works.
   res.cookie('sid', sid, { httpOnly: true, sameSite: 'lax', secure: req.secure });
   res.json({ ok: true });
 });
+
+app.post('/api/login/resend', async (req, res) => {
+  const c = challenges.get(String(req.body.challenge || ''));
+  const user = c && store.getUser(c.userId);
+  if (!c || !user || c.expires < Date.now()) return res.status(400).json({ error: 'Please sign in again.', restart: true });
+  if (Date.now() - c.sentAt < 30000) return res.status(429).json({ error: 'Please wait 30 seconds before asking for another code.' });
+  req.actor = actorOf(user);
+  await sendOtp(user, req.body.challenge, req);
+  res.json({ ok: true });
+});
+
 app.post('/api/logout', (req, res) => {
-  if (sessions.has(req.cookies.sid)) {
-    req.actor = 'Administrator';
-    sysLog(req, 'logout', 'Administrator signed out');
+  const s = sessions.get(req.cookies.sid);
+  const user = s && store.getUser(s.userId);
+  if (user) {
+    req.actor = actorOf(user);
+    sysLog(req, 'logout', `${user.name} signed out`);
   }
   sessions.delete(req.cookies.sid);
   saveSessions();
   res.clearCookie('sid');
   res.json({ ok: true });
 });
-app.get('/api/me', requireAdmin, (req, res) =>
-  res.json({ company: COMPANY, mail: mailer.enabled(), notify: process.env.NOTIFY_EMAIL || '', dateFormats: DATE_FORMATS, reasons: REASONS }));
 
-app.post('/api/test-email', requireAdmin, async (req, res) => {
+app.get('/api/me', requireUser, (req, res) =>
+  res.json({ company: COMPANY, mail: mailer.enabled(), notify: process.env.NOTIFY_EMAIL || '', dateFormats: DATE_FORMATS, reasons: REASONS, user: publicUser(req.user), idleMinutes: IDLE_MINUTES }));
+
+// ---------- Passwords: invitation, reset, change ----------
+async function emailAccountLink(user, kind, req) {
+  const token = authLib.newToken();
+  const hours = kind === 'invite' ? 7 * 24 : 1;
+  user[kind === 'invite' ? 'invite' : 'reset'] = { hash: authLib.hashSecret(token), expires: new Date(Date.now() + hours * 3600000).toISOString() };
+  store.save();
+  const link = `${BASE_URL}/account.html?t=${token}`;
+  const sent = await mailer.send({
+    to: user.email,
+    subject: kind === 'invite' ? `You're invited to ${COMPANY} eSign` : `Reset your ${COMPANY} eSign password`,
+    heading: kind === 'invite' ? `Welcome to ${COMPANY} eSign` : 'Reset your password',
+    text: kind === 'invite'
+      ? `Hello ${user.name},\n\n${req.user ? req.user.name : 'An administrator'} has created an account for you. Set your password to start sending documents for signature.\nThis link is valid for 7 days.`
+      : `Hello ${user.name},\n\nUse the button below to choose a new password. The link is valid for 1 hour and works once.\nIf you didn't ask for this, you can ignore this email.`,
+    link, linkLabel: kind === 'invite' ? 'SET MY PASSWORD' : 'RESET PASSWORD',
+  }).catch((e) => { console.error('Mail error:', e.message); return false; });
+  return { sent, link };
+}
+
+// Set a password from an invitation or reset link (single use).
+app.post('/api/password/set', (req, res) => {
+  const hash = authLib.hashSecret(String(req.body.token || ''));
+  const user = store.users().find((u) => ['invite', 'reset'].some((k) => u[k]?.hash === hash && Date.parse(u[k].expires) > Date.now()));
+  if (!user || user.status === 'disabled') return res.status(400).json({ error: 'This link has expired or was already used. Ask for a new one.' });
+  const problem = authLib.passwordProblem(req.body.password, user);
+  if (problem) return res.status(400).json({ error: problem });
+  const wasInvite = user.invite?.hash === hash;
+  user.passwordHash = authLib.hashPassword(req.body.password);
+  user.status = 'active';
+  user.failed = 0;
+  user.lockedUntil = undefined;
+  delete user.invite;
+  delete user.reset;
+  // A new password signs the person out everywhere else.
+  for (const [k, s] of sessions) if (s.userId === user.id) sessions.delete(k);
+  saveSessions();
+  store.save();
+  req.actor = actorOf(user);
+  sysLog(req, 'password', wasInvite ? `${user.name} activated their account and set a password` : `${user.name} reset their password`);
+  res.json({ ok: true, email: user.email });
+});
+
+app.get('/api/password/link-info', (req, res) => {
+  const hash = authLib.hashSecret(String(req.query.t || ''));
+  const user = store.users().find((u) => ['invite', 'reset'].some((k) => u[k]?.hash === hash && Date.parse(u[k].expires) > Date.now()));
+  if (!user || user.status === 'disabled') return res.status(400).json({ error: 'This link has expired or was already used.' });
+  res.json({ company: COMPANY, name: user.name, email: user.email, kind: user.invite?.hash === hash ? 'invite' : 'reset' });
+});
+
+// "Forgot password?" Always answers the same, so it can't be used to find out which emails have accounts.
+app.post('/api/password/forgot', async (req, res) => {
+  if (tooManyAttempts(req)) return res.status(429).json({ error: 'Too many attempts. Please wait 15 minutes.' });
+  const user = store.getUserByEmail(String(req.body.email || ''));
+  if (user && user.status === 'active') {
+    req.actor = actorOf(user);
+    await emailAccountLink(user, 'reset', req);
+    sysLog(req, 'password', `Password reset link emailed to ${user.email}`);
+  }
+  res.json({ ok: true });
+});
+
+app.post('/api/password/change', requireUser, (req, res) => {
+  if (!authLib.verifyPassword(req.body.current, req.user.passwordHash)) {
+    sysLog(req, 'login_failed', `Password change refused for ${req.user.email}: current password wrong`);
+    return res.status(400).json({ error: 'Your current password is not correct.' });
+  }
+  const problem = authLib.passwordProblem(req.body.next, req.user);
+  if (problem) return res.status(400).json({ error: problem });
+  if (authLib.verifyPassword(req.body.next, req.user.passwordHash)) return res.status(400).json({ error: 'Choose a password different from your current one.' });
+  req.user.passwordHash = authLib.hashPassword(req.body.next);
+  for (const [k, s] of sessions) if (s.userId === req.user.id && k !== req.cookies.sid) sessions.delete(k);
+  saveSessions();
+  store.save();
+  sysLog(req, 'password', `${req.user.name} changed their password`);
+  res.json({ ok: true });
+});
+
+// ---------- User management (administrators) ----------
+app.get('/api/users', requireUser, requireAdminRole, (req, res) => res.json(store.users().map(publicUser)));
+
+app.post('/api/users', requireUser, requireAdminRole, async (req, res) => {
+  const name = String(req.body.name || '').trim().slice(0, 120);
+  const email = String(req.body.email || '').trim().toLowerCase();
+  const role = ROLES.includes(req.body.role) ? req.body.role : 'sender';
+  if (!name) return res.status(400).json({ error: 'Please enter the person\'s name.' });
+  if (!isEmail(email)) return res.status(400).json({ error: 'Please enter a valid email address.' });
+  if (store.getUserByEmail(email)) return res.status(400).json({ error: 'A user with this email already exists. Each person has one account.' });
+  const user = { id: id(8), email, name, role, status: 'invited', createdAt: now(), createdBy: req.user.id, failed: 0 };
+  store.addUser(user);
+  const { sent, link } = await emailAccountLink(user, 'invite', req);
+  sysLog(req, 'user', `User invited: ${actorOf(user)} as ${role}`);
+  // The link is shown only when email is off; otherwise only the invited person receives it.
+  res.json({ user: publicUser(user), emailed: sent, link: sent ? undefined : link });
+});
+
+app.post('/api/users/:id/:action', requireUser, requireAdminRole, async (req, res) => {
+  const user = store.getUser(req.params.id);
+  if (!user) return res.status(404).json({ error: 'User not found' });
+  const self = user.id === req.user.id;
+  const admins = store.users().filter((u) => u.role === 'admin' && u.status === 'active');
+  switch (req.params.action) {
+    case 'disable':
+      if (self) return res.status(400).json({ error: "You can't disable your own account." });
+      user.status = 'disabled';
+      for (const [k, s] of sessions) if (s.userId === user.id) sessions.delete(k);
+      saveSessions();
+      sysLog(req, 'user', `User disabled: ${actorOf(user)}`);
+      break;
+    case 'enable':
+      user.status = user.passwordHash ? 'active' : 'invited';
+      sysLog(req, 'user', `User re-enabled: ${actorOf(user)}`);
+      break;
+    case 'unlock':
+      user.lockedUntil = undefined;
+      user.failed = 0;
+      sysLog(req, 'user', `User unlocked: ${actorOf(user)}`);
+      break;
+    case 'role': {
+      const role = req.body.role;
+      if (!ROLES.includes(role)) return res.status(400).json({ error: 'Unknown role' });
+      if (user.role === 'admin' && role !== 'admin' && admins.length <= 1 && user.status === 'active') return res.status(400).json({ error: 'Keep at least one active administrator.' });
+      sysLog(req, 'user', `Role of ${actorOf(user)} changed from ${user.role} to ${role}`);
+      user.role = role;
+      break;
+    }
+    case 'resend-invite': {
+      if (user.status !== 'invited') return res.status(400).json({ error: 'This user has already activated their account.' });
+      const r = await emailAccountLink(user, 'invite', req);
+      sysLog(req, 'user', `Invitation re-sent to ${user.email}`);
+      store.save();
+      return res.json({ user: publicUser(user), emailed: r.sent, link: r.sent ? undefined : r.link });
+    }
+    case 'reset-password': {
+      if (user.status !== 'active') return res.status(400).json({ error: 'Only active users can reset their password.' });
+      const r = await emailAccountLink(user, 'reset', req);
+      sysLog(req, 'user', `Password reset link sent to ${user.email} by ${req.user.name}`);
+      store.save();
+      return res.json({ user: publicUser(user), emailed: r.sent, link: r.sent ? undefined : r.link });
+    }
+    default:
+      return res.status(404).json({ error: 'Unknown action' });
+  }
+  store.save();
+  res.json({ user: publicUser(user) });
+});
+
+app.post('/api/test-email', requireUser, async (req, res) => {
   if (!mailer.enabled()) return res.status(400).json({ error: 'Email is off. Add your SMTP settings to the .env file and restart.' });
   const to = String(req.body.to || '').trim();
   if (!isEmail(to)) return res.status(400).json({ error: 'Enter a valid email address.' });
@@ -144,9 +434,10 @@ app.post('/api/test-email', requireAdmin, async (req, res) => {
 });
 
 // Status emails to the sender, like DocuSign's "X has signed" notices.
-async function notifySender(subject, text, attachments) {
-  if (!process.env.NOTIFY_EMAIL) return;
-  await mailer.send({ to: process.env.NOTIFY_EMAIL, subject, heading: subject, text, attachments }).catch((e) => console.error('Mail error:', e.message));
+// Goes to the person who sent the agreement, plus NOTIFY_EMAIL (e.g. a shared QA mailbox) if set.
+async function notifySender(subject, text, attachments, doc) {
+  const to = [...new Set([doc?.senderEmail, process.env.NOTIFY_EMAIL].filter(Boolean).map((e) => e.toLowerCase()))];
+  for (const addr of to) await mailer.send({ to: addr, subject, heading: subject, text, attachments }).catch((e) => console.error('Mail error:', e.message));
 }
 
 // ---------- PDF helpers ----------
@@ -181,7 +472,7 @@ function adminView(doc) {
   };
 }
 
-app.get('/api/documents', requireAdmin, (req, res) => {
+app.get('/api/documents', requireUser, (req, res) => {
   res.json(
     store.all().map((d) => ({
       id: d.id, agreementId: d.agreementId, title: d.title, status: d.status, createdAt: d.createdAt, completedAt: d.completedAt,
@@ -190,7 +481,7 @@ app.get('/api/documents', requireAdmin, (req, res) => {
   );
 });
 
-app.post('/api/documents', requireAdmin, upload.array('file', 20), async (req, res) => {
+app.post('/api/documents', requireUser, upload.array('file', 20), async (req, res) => {
   if (!req.files?.length) return res.status(400).json({ error: 'Please upload a PDF file' });
   const bytes = req.files.length === 1 ? (await loadPdf(req.files[0].buffer), req.files[0].buffer) : await mergePdfs(req.files.map((f) => f.buffer));
   const doc = {
@@ -205,8 +496,9 @@ app.post('/api/documents', requireAdmin, upload.array('file', 20), async (req, r
     digitalSign: true,
     status: 'draft',
     signingOrder: 'sequential',
-    senderName: COMPANY,
-    senderEmail: SENDER_EMAIL,
+    senderName: req.user.name,
+    senderEmail: req.user.email,
+    createdBy: req.user.id,
     createdAt: now(),
     originalFile: `${id(9)}.pdf`,
     originalHash: sha256(bytes),
@@ -215,13 +507,13 @@ app.post('/api/documents', requireAdmin, upload.array('file', 20), async (req, r
     events: [],
   };
   fs.writeFileSync(filePath(doc.originalFile), bytes);
-  log(doc, `Document created by ${COMPANY}${SENDER_EMAIL ? ` (${SENDER_EMAIL})` : ''}`, req, 'created');
+  log(doc, `Document created by ${req.user.name} (${req.user.email})`, req, 'created');
   if (req.files.length > 1) log(doc, `${req.files.length} files merged: ${req.files.map((f) => f.originalname).join(', ')}`, req, 'pages');
   store.insert(doc);
   res.json(adminView(doc));
 });
 
-app.get('/api/documents/:id', requireAdmin, (req, res) => {
+app.get('/api/documents/:id', requireUser, (req, res) => {
   const doc = store.get(req.params.id);
   if (!doc) return res.status(404).json({ error: 'Not found' });
   res.json(adminView(doc));
@@ -255,7 +547,7 @@ function cleanField(f) {
   };
 }
 
-app.put('/api/documents/:id', requireAdmin, (req, res) => {
+app.put('/api/documents/:id', requireUser, (req, res) => {
   const doc = store.get(req.params.id);
   if (!doc) return res.status(404).json({ error: 'Not found' });
   if (doc.status !== 'draft') return res.status(400).json({ error: 'Only drafts can be edited' });
@@ -340,7 +632,7 @@ function removeFiles(doc) {
 }
 
 // Only unsent drafts can be discarded. Once sent, a document is an agreement: it can be cancelled, never deleted.
-app.delete('/api/documents/:id', requireAdmin, (req, res) => {
+app.delete('/api/documents/:id', requireUser, (req, res) => {
   const doc = store.get(req.params.id);
   if (!doc) return res.status(404).json({ error: 'Not found' });
   if (doc.status !== 'draft') return res.status(403).json({ error: 'Agreements cannot be deleted. Cancel it instead.' });
@@ -353,46 +645,44 @@ app.delete('/api/documents/:id', requireAdmin, (req, res) => {
 // ---------- Comments on drafts (before sending) ----------
 // Team discussion while preparing an agreement. Comments can be pinned to a spot on a page and
 // resolved, but never edited or deleted; each one is recorded in the audit trail.
-app.post('/api/documents/:id/comments', requireAdmin, (req, res) => {
+app.post('/api/documents/:id/comments', requireUser, (req, res) => {
   const doc = store.get(req.params.id);
   if (!doc) return res.status(404).json({ error: 'Not found' });
   if (doc.status !== 'draft') return res.status(400).json({ error: 'Comments can only be added before sending.' });
-  const author = String(req.body.author || '').trim().slice(0, 80);
+  // The author is the signed-in person; it can't be typed in.
+  const author = req.user.name;
   const text = String(req.body.text || '').trim().slice(0, 2000);
-  if (!author) return res.status(400).json({ error: 'Please enter your name.' });
   if (!text) return res.status(400).json({ error: 'Please write a comment.' });
   const pinned = Number.isInteger(req.body.page) && req.body.x >= 0 && req.body.x <= 1 && req.body.y >= 0 && req.body.y <= 1;
-  const c = { id: id(6), author, text, at: now(), resolved: false, ...(pinned ? { page: req.body.page, x: Number(req.body.x), y: Number(req.body.y) } : {}) };
+  const c = { id: id(6), author, authorEmail: req.user.email, text, at: now(), resolved: false, ...(pinned ? { page: req.body.page, x: Number(req.body.x), y: Number(req.body.y) } : {}) };
   doc.comments = [...(doc.comments || []), c];
-  req.actor = `Administrator (${author})`;
   log(doc, `Comment added by ${author}${pinned ? ` on page ${c.page + 1}` : ''}: "${text}"`, req, 'comment');
   store.save();
   res.json(c);
 });
 
-app.post('/api/documents/:id/comments/:cid/resolve', requireAdmin, (req, res) => {
+app.post('/api/documents/:id/comments/:cid/resolve', requireUser, (req, res) => {
   const doc = store.get(req.params.id);
   const c = doc?.comments?.find((x) => x.id === req.params.cid);
   if (!c) return res.status(404).json({ error: 'Not found' });
   if (doc.status !== 'draft') return res.status(400).json({ error: 'Comments are read-only after sending.' });
-  const author = String(req.body.author || '').trim().slice(0, 80) || 'Administrator';
+  const author = req.user.name;
   c.resolved = req.body.resolved !== false;
   c.resolvedBy = c.resolved ? author : undefined;
   c.resolvedAt = c.resolved ? now() : undefined;
-  req.actor = `Administrator (${author})`;
   log(doc, `Comment by ${c.author} ${c.resolved ? 'resolved' : 'reopened'} by ${author}: "${c.text.slice(0, 80)}"`, req, 'comment');
   store.save();
   res.json(c);
 });
 
 // System log (sign-ins, discarded drafts, test emails) with its integrity check.
-app.get('/api/system-log', requireAdmin, (req, res) => {
+app.get('/api/system-log', requireUser, requireAdminRole, (req, res) => {
   const entries = syslog.read();
   res.json({ integrity: audit.verify(entries), entries: entries.slice(-500).reverse() });
 });
 
 // ---------- Admin: merge files & organize pages ----------
-app.post('/api/documents/:id/sources', requireAdmin, upload.array('file', 20), async (req, res) => {
+app.post('/api/documents/:id/sources', requireUser, upload.array('file', 20), async (req, res) => {
   const doc = store.get(req.params.id);
   if (!doc || doc.status !== 'draft') return res.status(400).json({ error: 'Only drafts can be changed' });
   if (!req.files?.length) return res.status(400).json({ error: 'Choose at least one PDF' });
@@ -409,7 +699,7 @@ app.post('/api/documents/:id/sources', requireAdmin, upload.array('file', 20), a
   res.json(added);
 });
 
-app.get('/api/documents/:id/sources/:sid', requireAdmin, (req, res) => {
+app.get('/api/documents/:id/sources/:sid', requireUser, (req, res) => {
   const src = store.get(req.params.id)?.sources?.[req.params.sid];
   if (!src) return res.status(404).end();
   sendPdf(res, src.file, src.name, true);
@@ -430,7 +720,7 @@ function turnField(f, quarterTurns, before, after) {
   return { ...f, x: clamp(cx / after.width - w / 2, w), y: clamp(cy / after.height - h / 2, h), w, h };
 }
 
-app.post('/api/documents/:id/pages', requireAdmin, async (req, res) => {
+app.post('/api/documents/:id/pages', requireUser, async (req, res) => {
   const doc = store.get(req.params.id);
   if (!doc || doc.status !== 'draft') return res.status(400).json({ error: 'Only drafts can be changed' });
   const plan = req.body.pages;
@@ -512,7 +802,7 @@ async function invite(doc, signer, reminder = false) {
   }
 }
 
-app.post('/api/documents/:id/send', requireAdmin, async (req, res) => {
+app.post('/api/documents/:id/send', requireUser, async (req, res) => {
   const doc = store.get(req.params.id);
   if (!doc) return res.status(404).json({ error: 'Not found' });
   if (doc.status !== 'draft') return res.status(400).json({ error: 'Already sent' });
@@ -537,7 +827,7 @@ app.post('/api/documents/:id/send', requireAdmin, async (req, res) => {
   res.json(adminView(doc));
 });
 
-app.post('/api/documents/:id/remind/:signerId', requireAdmin, async (req, res) => {
+app.post('/api/documents/:id/remind/:signerId', requireUser, async (req, res) => {
   const doc = store.get(req.params.id);
   const signer = doc && doc.signers.find((s) => s.id === req.params.signerId);
   if (!signer || doc.status !== 'sent' || signer.status === 'signed') return res.status(400).json({ error: 'Cannot remind this signer' });
@@ -549,7 +839,7 @@ app.post('/api/documents/:id/remind/:signerId', requireAdmin, async (req, res) =
 });
 
 // Cancelling stops the agreement for good and tells every signer, including those who already signed.
-app.post('/api/documents/:id/void', requireAdmin, async (req, res) => {
+app.post('/api/documents/:id/void', requireUser, async (req, res) => {
   const doc = store.get(req.params.id);
   if (!doc || doc.status !== 'sent') return res.status(400).json({ error: 'Only agreements out for signature can be cancelled' });
   const reason = String(req.body.reason || '').trim().slice(0, 300);
@@ -576,7 +866,7 @@ app.post('/api/documents/:id/void', requireAdmin, async (req, res) => {
     }
   }
   if (notified.length) log(doc, `Cancellation notice emailed to ${notified.join(', ')}`, null, 'emailed');
-  await notifySender(`Cancelled: "${doc.title}" [${doc.agreementId}]`, `You cancelled agreement ${doc.agreementId} "${doc.title}".\nReason: ${reason}\n${notified.length ? `Notified: ${notified.join(', ')}` : 'Email is off, so signers were not notified by email.'}`);
+  await notifySender(`Cancelled: "${doc.title}" [${doc.agreementId}]`, `You cancelled agreement ${doc.agreementId} "${doc.title}".\nReason: ${reason}\n${notified.length ? `Notified: ${notified.join(', ')}` : 'Email is off, so signers were not notified by email.'}`, undefined, doc);
   store.save();
   res.json({ ...adminView(doc), notified: notified.length });
 });
@@ -602,15 +892,15 @@ function sendPdf(res, file, name, inline) {
   res.send(fs.readFileSync(filePath(file)));
 }
 
-app.get('/api/documents/:id/original', requireAdmin, (req, res) => {
+app.get('/api/documents/:id/original', requireUser, (req, res) => {
   const doc = store.get(req.params.id);
   if (!doc) return res.status(404).end();
   sendPdf(res, doc.originalFile, `${doc.title}.pdf`, true);
 });
-app.get('/api/documents/:id/signed', requireAdmin, (req, res) => {
+app.get('/api/documents/:id/signed', requireUser, (req, res) => {
   const doc = store.get(req.params.id);
   if (!doc || !doc.finalFile) return res.status(404).end();
-  log(doc, 'Signed document downloaded by Administrator', req, 'download', `${auditStamp(now())} - IP address: ${clientIp(req)} - Device: ${deviceOf(req.headers['user-agent'])}`);
+  log(doc, `Signed document downloaded by ${req.actor}`, req, 'download', `${auditStamp(now())} - IP address: ${clientIp(req)} - Device: ${deviceOf(req.headers['user-agent'])}`);
   store.save();
   sendPdf(res, doc.finalFile, `${doc.title} - signed.pdf`, false);
 });
@@ -911,11 +1201,11 @@ app.post('/api/sign/:token', async (req, res) => {
         .send({ to: s.email, subject: `Completed: "${doc.title}" [${doc.agreementId}]`, heading: 'Your agreement has been completed', text: `All parties have signed "${doc.title}".\nAgreement ID: ${doc.agreementId}\n\nThe signed copy is attached to this email. Please keep it for your records.`, attachments })
         .catch((e) => console.error('Mail error:', e.message));
     }
-    await notifySender(`Completed: "${doc.title}" [${doc.agreementId}]`, `All parties have signed agreement ${doc.agreementId} "${doc.title}". The signed copy with its audit report is attached.`, attachments);
+    await notifySender(`Completed: "${doc.title}" [${doc.agreementId}]`, `All parties have signed agreement ${doc.agreementId} "${doc.title}". The signed copy with its audit report is attached.`, attachments, doc);
   } else {
     store.save();
     const next = activeSigners(doc);
-    await notifySender(`${signer.name} signed "${doc.title}" [${doc.agreementId}]`, `${who(signer)} signed "${doc.title}" (signer ${signer.order} of ${doc.signers.length}).${reason ? `\nReason: ${reason}` : ''}\n${doc.signingOrder === 'sequential' && next.length ? `Signing link sent to next signer: ${next.map((s) => `${s.order}. ${who(s)}`).join(', ')}` : `Still waiting on: ${next.map((s) => s.name).join(', ')}`}.`);
+    await notifySender(`${signer.name} signed "${doc.title}" [${doc.agreementId}]`, `${who(signer)} signed "${doc.title}" (signer ${signer.order} of ${doc.signers.length}).${reason ? `\nReason: ${reason}` : ''}\n${doc.signingOrder === 'sequential' && next.length ? `Signing link sent to next signer: ${next.map((s) => `${s.order}. ${who(s)}`).join(', ')}` : `Still waiting on: ${next.map((s) => s.name).join(', ')}`}.`, undefined, doc);
     for (const s of issueLinks(doc)) await invite(doc, s);
   }
   store.save();
@@ -932,7 +1222,7 @@ app.post('/api/sign/:token/decline', async (req, res) => {
   const reason = req.body.reason ? String(req.body.reason).slice(0, 300) : '';
   log(doc, `Document declined by ${who(signer)}${reason ? `. Reason: ${reason}` : ''}`, req, 'declined');
   store.save();
-  await notifySender(`${signer.name} declined "${doc.title}" [${doc.agreementId}]`, `${who(signer)} declined to sign agreement ${doc.agreementId} "${doc.title}".${reason ? `\nReason: ${reason}` : ''}`);
+  await notifySender(`${signer.name} declined "${doc.title}" [${doc.agreementId}]`, `${who(signer)} declined to sign agreement ${doc.agreementId} "${doc.title}".${reason ? `\nReason: ${reason}` : ''}`, undefined, doc);
   res.json({ ok: true });
 });
 

@@ -95,6 +95,9 @@ async function api(url, opts = {}) {
   if (!res.ok) {
     const err = new Error(data?.error || `Request failed (${res.status})`);
     err.status = res.status;
+    err.restart = !!data?.restart;
+    // Session ended (inactivity, disabled account…): the dashboard returns to sign-in.
+    if (res.status === 401 && !/^\/api\/(login|auth|password)/.test(url) && window.onUnauthorized) window.onUnauthorized(err.message);
     throw err;
   }
   return data;

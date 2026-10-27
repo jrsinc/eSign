@@ -6,6 +6,7 @@ let me = null;
 const rid = () => Math.random().toString(36).slice(2, 10);
 const REMINDER_LABELS = { none: 'Never', daily: 'Every day', every2days: 'Every 2 days', weekly: 'Every week' };
 
+let watcher = null;
 async function boot() {
   try {
     me = await api('/api/me');
@@ -13,36 +14,158 @@ async function boot() {
     document.title = `${me.company} eSign`;
     $('#nav').classList.remove('hidden');
     $('#logout').classList.remove('hidden');
+    $('#usersLink').classList.toggle('hidden', me.user.role !== 'admin');
+    $('#logLink').classList.toggle('hidden', me.user.role !== 'admin');
+    $('#account').classList.remove('hidden');
+    $('#account').textContent = `👤 ${me.user.name}`;
+    $('#account').title = `${me.user.email} · ${me.user.role === 'admin' ? 'Administrator' : 'Sender'} · click to change your password`;
     route();
-    watchAgreements();
-    setInterval(watchAgreements, 30000);
+    if (!watcher) {
+      watchAgreements();
+      watcher = setInterval(watchAgreements, 30000);
+    }
   } catch (e) {
-    if (e.status === 401) showLogin();
+    if (e.status === 401) showLogin(e.message !== 'Not logged in' ? e.message : '');
     else app.innerHTML = `<div class="wrap card">${esc(e.message)}</div>`;
   }
 }
 
-function showLogin() {
+// Any request that finds the session gone (signed out after inactivity, disabled, …) returns to sign-in.
+window.onUnauthorized = (message) => {
+  if (!me) return;
+  me = null;
+  showLogin(message);
+};
+
+// ---------------- Sign-in: email + password, then a code sent by email ----------------
+async function showLogin(notice = '') {
+  me = null;
   actions.innerHTML = '';
+  ['#nav', '#logout', '#account'].forEach((s) => $(s).classList.add('hidden'));
+  const status = await api('/api/auth/status');
+  if (status.setupRequired) return showSetup(status);
   app.innerHTML = `
     <div class="center-box card">
       <h1>Sign in</h1>
-      <p class="muted">Administrator access to send documents for signature.</p>
+      <p class="muted">${esc(status.company)} eSign. Use your own email address and password.</p>
+      ${notice ? `<p class="small" style="color:var(--warn)">${esc(notice)}</p>` : ''}
       <form id="loginForm">
+        <label for="email">Email</label>
+        <input id="email" type="email" autocomplete="username" required autofocus>
         <label for="pw">Password</label>
-        <input id="pw" type="password" autocomplete="current-password" required autofocus>
+        <input id="pw" type="password" autocomplete="current-password" required>
         <p id="loginErr" class="small" style="color:var(--danger)"></p>
-        <button class="primary" style="width:100%">Sign in</button>
+        <button class="primary" style="width:100%">Continue</button>
       </form>
+      <p class="small" style="margin-top:14px"><a href="#" id="forgot">Forgot password?</a></p>
+      <p class="small muted">Two-step sign-in: after your password, we email you a one-time code.</p>
     </div>`;
+  $('#forgot').onclick = (e) => { e.preventDefault(); showForgot($('#email').value); };
   $('#loginForm').onsubmit = async (e) => {
     e.preventDefault();
+    const btn = $('#loginForm button');
+    btn.disabled = true;
     try {
-      await api('/api/login', { method: 'POST', body: { password: $('#pw').value } });
-      boot();
+      const r = await api('/api/login', { method: 'POST', body: { email: $('#email').value, password: $('#pw').value } });
+      showCodeStep(r);
     } catch (err) {
       $('#loginErr').textContent = err.message;
+      btn.disabled = false;
     }
+  };
+}
+
+function showCodeStep({ challenge, sentTo, minutes }) {
+  app.innerHTML = `
+    <div class="center-box card">
+      <h1>Enter your sign-in code</h1>
+      <p class="muted">We emailed a 6-digit code to <strong>${esc(sentTo)}</strong>. It expires in ${minutes} minutes.</p>
+      <form id="codeForm">
+        <label for="code">Code</label>
+        <input id="code" inputmode="numeric" autocomplete="one-time-code" maxlength="7" required autofocus
+          style="font-size:24px;letter-spacing:8px;text-align:center;font-family:Consolas,monospace" placeholder="000000">
+        <p id="codeErr" class="small" style="color:var(--danger)"></p>
+        <button class="primary" style="width:100%">Verify and sign in</button>
+      </form>
+      <div class="row" style="justify-content:space-between;margin-top:12px">
+        <a href="#" id="back" class="small">← Use a different account</a>
+        <a href="#" id="resend" class="small">Send a new code</a>
+      </div>
+      <p class="small muted" style="margin-top:12px">Can't find it? Check your junk / spam folder.</p>
+    </div>`;
+  $('#back').onclick = (e) => { e.preventDefault(); showLogin(); };
+  $('#resend').onclick = async (e) => {
+    e.preventDefault();
+    try {
+      await api('/api/login/resend', { method: 'POST', body: { challenge } });
+      toast('A new code has been emailed');
+    } catch (err) {
+      if (err.restart) return showLogin(err.message);
+      toast(err.message, 4000);
+    }
+  };
+  $('#codeForm').onsubmit = async (e) => {
+    e.preventDefault();
+    try {
+      await api('/api/login/verify', { method: 'POST', body: { challenge, code: $('#code').value } });
+      location.hash = '';
+      boot();
+    } catch (err) {
+      if (err.restart) return showLogin(err.message);
+      $('#codeErr').textContent = err.message;
+      $('#code').select();
+    }
+  };
+}
+
+function showForgot(email = '') {
+  app.innerHTML = `
+    <div class="center-box card">
+      <h1>Reset your password</h1>
+      <p class="muted">Enter your email address. If it belongs to an account, we'll email a link to choose a new password.</p>
+      <form id="forgotForm">
+        <label for="fEmail">Email</label>
+        <input id="fEmail" type="email" value="${esc(email)}" required autofocus>
+        <button class="primary" style="width:100%;margin-top:14px">Email me a reset link</button>
+      </form>
+      <p class="small" style="margin-top:14px"><a href="#" id="back">← Back to sign in</a></p>
+    </div>`;
+  $('#back').onclick = (e) => { e.preventDefault(); showLogin(); };
+  $('#forgotForm').onsubmit = async (e) => {
+    e.preventDefault();
+    try {
+      await api('/api/password/forgot', { method: 'POST', body: { email: $('#fEmail').value } });
+      showLogin('If that email has an account, a reset link is on its way. It is valid for 1 hour.');
+    } catch (err) { toast(err.message, 4000); }
+  };
+}
+
+// First run: no accounts yet. The setup password from .env proves ownership once.
+function showSetup(status) {
+  app.innerHTML = `
+    <div class="center-box card" style="max-width:460px">
+      <h1>Create the first administrator</h1>
+      <p class="muted">${esc(status.company)} eSign now uses personal accounts: each person signs in with their own email, password and an emailed code.</p>
+      <form id="setupForm">
+        <label for="sPw">Setup password (ADMIN_PASSWORD in the .env file)</label>
+        <input id="sPw" type="password" required autofocus>
+        <label for="sName">Your full name</label>
+        <input id="sName" required autocomplete="name">
+        <label for="sEmail">Your email (this is your sign-in ID)</label>
+        <input id="sEmail" type="email" required autocomplete="username">
+        <label for="sNew">Choose your password</label>
+        <input id="sNew" type="password" required autocomplete="new-password">
+        <p class="small muted">At least 10 characters, with letters and numbers; not your name or email.</p>
+        <p id="setupErr" class="small" style="color:var(--danger)"></p>
+        <button class="primary" style="width:100%">Create account</button>
+      </form>
+    </div>`;
+  $('#setupForm').onsubmit = async (e) => {
+    e.preventDefault();
+    try {
+      await api('/api/auth/setup', { method: 'POST', body: { adminPassword: $('#sPw').value, name: $('#sName').value, email: $('#sEmail').value, password: $('#sNew').value } });
+      showLogin('Account created. Sign in with your email and new password.');
+    } catch (err) { $('#setupErr').textContent = err.message; }
   };
 }
 
@@ -52,6 +175,32 @@ $('#logout').onclick = async () => {
   location.reload();
 };
 
+$('#account').onclick = () => {
+  const bg = document.createElement('div');
+  bg.className = 'modal-bg';
+  bg.innerHTML = `
+    <div class="modal" style="max-width:420px">
+      <h2>Change password</h2>
+      <p class="small muted">${esc(me.user.name)} · ${esc(me.user.email)} · ${me.user.role === 'admin' ? 'Administrator' : 'Sender'}</p>
+      <label for="cpCur">Current password</label>
+      <input id="cpCur" type="password" autocomplete="current-password">
+      <label for="cpNew">New password</label>
+      <input id="cpNew" type="password" autocomplete="new-password">
+      <p class="small muted">At least 10 characters, with letters and numbers; not your name or email. Other devices will be signed out.</p>
+      <div class="row end" style="margin-top:12px"><button id="cpCancel">Cancel</button><button id="cpSave" class="primary">Change password</button></div>
+    </div>`;
+  document.body.append(bg);
+  $('#cpCur').focus();
+  $('#cpCancel').onclick = () => bg.remove();
+  $('#cpSave').onclick = async () => {
+    try {
+      await api('/api/password/change', { method: 'POST', body: { current: $('#cpCur').value, next: $('#cpNew').value } });
+      bg.remove();
+      toast('Password changed');
+    } catch (e) { toast(e.message, 4000); }
+  };
+};
+
 window.addEventListener('hashchange', () => me && route());
 
 function route() {
@@ -59,8 +208,84 @@ function route() {
   actions.innerHTML = '';
   document.onkeydown = null;
   if (m) openDoc(m[1]);
-  else if (location.hash === '#/system-log') showSystemLog();
+  else if (location.hash === '#/system-log' && me.user.role === 'admin') showSystemLog();
+  else if (location.hash === '#/users' && me.user.role === 'admin') showUsers();
   else showList();
+}
+
+// ---------------- Users (administrators) ----------------
+async function showUsers() {
+  const users = await api('/api/users');
+  const statusBadge = (u) => {
+    if (u.lockedUntil && Date.parse(u.lockedUntil) > Date.now()) return '<span class="badge declined">locked</span>';
+    return { active: '<span class="badge completed">active</span>', invited: '<span class="badge sent">invited</span>', disabled: '<span class="badge voided">disabled</span>' }[u.status];
+  };
+  app.innerHTML = `
+    <div class="wrap">
+      <div class="card" style="margin-bottom:16px">
+        <h1>Users</h1>
+        <p class="muted small">Everyone who prepares or sends documents has their own account, signed in with their email, password and an emailed code. Signers don't need an account. Users are never deleted, only disabled, so the audit trail always shows who did what.</p>
+        <form id="addUser" class="row" style="flex-wrap:wrap;align-items:flex-end">
+          <div style="flex:1;min-width:160px"><label for="uName">Full name</label><input id="uName" required></div>
+          <div style="flex:1;min-width:200px"><label for="uEmail">Email (sign-in ID)</label><input id="uEmail" type="email" required></div>
+          <div><label for="uRole">Role</label><select id="uRole"><option value="sender">Sender</option><option value="admin">Administrator</option></select></div>
+          <button class="primary">Invite user</button>
+        </form>
+        <div id="inviteLink"></div>
+      </div>
+      <div class="card" style="padding:0">
+        <table>
+          <thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Status</th><th>Last sign-in</th><th></th></tr></thead>
+          <tbody>${users.map((u) => `
+            <tr data-id="${u.id}">
+              <td><strong>${esc(u.name)}</strong>${u.id === me.user.id ? ' <span class="small muted">(you)</span>' : ''}</td>
+              <td class="small">${esc(u.email)}</td>
+              <td><select data-role ${u.id === me.user.id ? 'disabled' : ''}><option value="sender" ${u.role === 'sender' ? 'selected' : ''}>Sender</option><option value="admin" ${u.role === 'admin' ? 'selected' : ''}>Administrator</option></select></td>
+              <td>${statusBadge(u)}</td>
+              <td class="small muted">${u.lastLoginAt ? when(u.lastLoginAt) : '—'}</td>
+              <td class="small" style="white-space:nowrap">
+                ${u.status === 'invited' ? '<button class="ghost small" data-act="resend-invite">Resend invite</button>' : ''}
+                ${u.status === 'active' && u.id !== me.user.id ? '<button class="ghost small" data-act="reset-password">Send reset link</button>' : ''}
+                ${u.lockedUntil && Date.parse(u.lockedUntil) > Date.now() ? '<button class="ghost small" data-act="unlock">Unlock</button>' : ''}
+                ${u.id === me.user.id ? '' : u.status === 'disabled' ? '<button class="ghost small" data-act="enable">Enable</button>' : '<button class="ghost small danger" data-act="disable">Disable</button>'}
+              </td>
+            </tr>`).join('')}</tbody>
+        </table>
+      </div>
+    </div>`;
+  const showLink = (r, what) => {
+    $('#inviteLink').innerHTML = r.link
+      ? `<p class="small" style="margin-top:10px;color:var(--warn)">Email is off, so the ${what} link wasn't sent. Give this link to the person yourself (and only to them):</p><div class="linkbox"><input readonly value="${esc(r.link)}"><button data-copy>Copy</button></div>`
+      : `<p class="small" style="margin-top:10px;color:var(--ok)">✓ The ${what} link was emailed to ${esc(r.user.email)}.</p>`;
+    $('#inviteLink [data-copy]')?.addEventListener('click', () => navigator.clipboard.writeText(r.link).then(() => toast('Link copied')));
+  };
+  $('#addUser').onsubmit = async (e) => {
+    e.preventDefault();
+    try {
+      const r = await api('/api/users', { method: 'POST', body: { name: $('#uName').value, email: $('#uEmail').value, role: $('#uRole').value } });
+      await showUsers();
+      showLink(r, 'invitation');
+    } catch (err) { toast(err.message, 4000); }
+  };
+  app.querySelectorAll('tr[data-id]').forEach((tr) => {
+    const uid = tr.dataset.id;
+    tr.querySelector('[data-role]').onchange = async (e) => {
+      try {
+        await api(`/api/users/${uid}/role`, { method: 'POST', body: { role: e.target.value } });
+        toast('Role changed');
+      } catch (err) { toast(err.message, 4000); showUsers(); }
+    };
+    tr.querySelectorAll('[data-act]').forEach((b) => (b.onclick = async () => {
+      const act = b.dataset.act;
+      if (act === 'disable' && !confirm('Disable this user? They are signed out immediately and can no longer sign in.')) return;
+      try {
+        const r = await api(`/api/users/${uid}/${act}`, { method: 'POST' });
+        await showUsers();
+        if (act === 'resend-invite') showLink(r, 'invitation');
+        if (act === 'reset-password') showLink(r, 'password reset');
+      } catch (err) { toast(err.message, 4000); }
+    }));
+  });
 }
 
 // Sign-ins, failed logins, discarded drafts and test emails, with the hash-chain check.
@@ -341,8 +566,7 @@ function showEditor(doc) {
         <p class="small muted">Each signer gets a personal certificate and a cryptographic signature in the PDF, shown in Adobe's Signatures panel. <a href="/ca.cer">Root certificate</a></p>`) +
       section('comments', `COMMENTS (${doc.comments.filter((c) => !c.resolved).length} open)`, `
         <div id="commentList">${doc.comments.length ? doc.comments.map(commentHtml).join('') : '<p class="small muted">No comments yet. Discuss the draft with your team here before sending.</p>'}</div>
-        <label for="cAuthor">Your name</label>
-        <input id="cAuthor" value="${esc(authorName())}" placeholder="e.g. Pratik Shah">
+        <p class="small muted" style="margin:10px 0 0">Commenting as <strong>${esc(me.user.name)}</strong></p>
         <label for="cText">Comment</label>
         <textarea id="cText" rows="3" placeholder="e.g. Please check the probe serial numbers on page 1"></textarea>
         <div class="row" style="margin-top:8px;justify-content:space-between">
@@ -362,7 +586,6 @@ function showEditor(doc) {
     $('#stampPage').onchange = (e) => { doc.stampPage = e.target.checked; scheduleSave(); };
     $('#digitalSign').checked = doc.digitalSign !== false;
     $('#digitalSign').onchange = (e) => { doc.digitalSign = e.target.checked; scheduleSave(); };
-    $('#cAuthor').oninput = (e) => { try { localStorage.setItem('esign.author', e.target.value); } catch {} };
     $('#cPin').onclick = () => {
       pinning = !pinning && !pendingPin;
       pendingPin = null;
@@ -371,10 +594,9 @@ function showEditor(doc) {
       if (pinning) toast('Now click the spot on the document to pin your comment');
     };
     $('#cAdd').onclick = async () => {
-      const author = $('#cAuthor').value.trim();
       const text = $('#cText').value.trim();
       try {
-        const c = await api(`/api/documents/${doc.id}/comments`, { method: 'POST', body: { author, text, ...(pendingPin || {}) } });
+        const c = await api(`/api/documents/${doc.id}/comments`, { method: 'POST', body: { text, ...(pendingPin || {}) } });
         doc.comments.push(c);
         pendingPin = null;
         renderSidebar();
@@ -385,7 +607,7 @@ function showEditor(doc) {
     sb.querySelectorAll('[data-resolve]').forEach((b) => (b.onclick = async () => {
       const c = doc.comments.find((x) => x.id === b.dataset.resolve);
       try {
-        Object.assign(c, await api(`/api/documents/${doc.id}/comments/${c.id}/resolve`, { method: 'POST', body: { author: $('#cAuthor').value.trim(), resolved: !c.resolved } }));
+        Object.assign(c, await api(`/api/documents/${doc.id}/comments/${c.id}/resolve`, { method: 'POST', body: { resolved: !c.resolved } }));
         renderSidebar();
         renderFields();
       } catch (e) { toast(e.message); }
@@ -931,7 +1153,6 @@ async function showOrganizer(doc) {
   render();
 }
 
-const authorName = () => { try { return localStorage.getItem('esign.author') || ''; } catch { return ''; } };
 
 function commentHtml(c, readOnly) {
   return `<div class="comment${c.resolved ? ' resolved' : ''}" data-comment="${c.id}">
