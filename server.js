@@ -322,8 +322,10 @@ app.post('/api/users', requireUser, requireAdminRole, async (req, res) => {
   // Welcome email with the sign-in ID and password. Signing in also needs the one-time code we email each time.
   mailer.send({
     to: email, subject: `Your ${COMPANY} eSign account`, heading: `Welcome to ${COMPANY} eSign`,
-    text: `Hello ${name},\n\n${req.user.name} has created an account for you.\n\nSign-in ID: ${email}\nPassword: ${pw.password}\n\nWhen you sign in, we will also email you a one-time code. Keep your password private and delete this email once you have noted it. Only your administrator can change your password.`,
-    link: BASE_URL, linkLabel: 'OPEN ESIGN',
+    text: `Hello ${name},\n\n${req.user.name} has created an account for you.`,
+    details: [['Sign-in ID', email], ['Password', pw.password]],
+    after: 'When you sign in, we will also email you a one-time code.\n\nKeep your password private and delete this email once you have noted it. Only your administrator can change your password.',
+    link: BASE_URL, linkLabel: 'SIGN IN', note: 'It contains your password.',
   }).catch((e) => console.error('Mail error:', e.message));
   res.json({ user: publicUser(user), password: pw.password });
 });
