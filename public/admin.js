@@ -18,7 +18,7 @@ async function boot() {
     $('#logLink').classList.toggle('hidden', me.user.role !== 'admin');
     $('#account').classList.remove('hidden');
     $('#account').textContent = `👤 ${me.user.name}`;
-    $('#account').title = `${me.user.email} · ${me.user.role === 'admin' ? 'Administrator' : 'Sender'} · click to change your password`;
+    $('#account').title = `${me.user.email} · ${me.user.role === 'admin' ? 'Administrator · click to change your password' : 'Sender'}`;
     route();
     if (!watcher) {
       watchAgreements();
@@ -57,10 +57,8 @@ async function showLogin(notice = '') {
         <p id="loginErr" class="small" style="color:var(--danger)"></p>
         <button class="primary" style="width:100%">Continue</button>
       </form>
-      <p class="small" style="margin-top:14px"><a href="#" id="forgot">Forgot password?</a></p>
-      <p class="small muted">Two-step sign-in: after your password, we email you a one-time code.</p>
+      <p class="small muted" style="margin-top:14px">Two-step sign-in: after your password, we email you a one-time code.<br>Forgot your password or locked out? Ask your administrator.</p>
     </div>`;
-  $('#forgot').onclick = (e) => { e.preventDefault(); showForgot($('#email').value); };
   $('#loginForm').onsubmit = async (e) => {
     e.preventDefault();
     const btn = $('#loginForm button');
@@ -118,28 +116,6 @@ function showCodeStep({ challenge, sentTo, minutes }) {
   };
 }
 
-function showForgot(email = '') {
-  app.innerHTML = `
-    <div class="center-box card">
-      <h1>Reset your password</h1>
-      <p class="muted">Enter your email address. If it belongs to an account, we'll email a link to choose a new password.</p>
-      <form id="forgotForm">
-        <label for="fEmail">Email</label>
-        <input id="fEmail" type="email" value="${esc(email)}" required autofocus>
-        <button class="primary" style="width:100%;margin-top:14px">Email me a reset link</button>
-      </form>
-      <p class="small" style="margin-top:14px"><a href="#" id="back">← Back to sign in</a></p>
-    </div>`;
-  $('#back').onclick = (e) => { e.preventDefault(); showLogin(); };
-  $('#forgotForm').onsubmit = async (e) => {
-    e.preventDefault();
-    try {
-      await api('/api/password/forgot', { method: 'POST', body: { email: $('#fEmail').value } });
-      showLogin('If that email has an account, a reset link is on its way. It is valid for 1 hour.');
-    } catch (err) { toast(err.message, 4000); }
-  };
-}
-
 // First run: no accounts yet. The setup password from .env proves ownership once.
 function showSetup(status) {
   app.innerHTML = `
@@ -176,6 +152,8 @@ $('#logout').onclick = async () => {
 };
 
 $('#account').onclick = () => {
+  // Only administrators manage passwords, including their own.
+  if (me.user.role !== 'admin') return toast('To change your password, please ask your administrator.', 4000);
   const bg = document.createElement('div');
   bg.className = 'modal-bg';
   bg.innerHTML = `
@@ -214,76 +192,120 @@ function route() {
 }
 
 // ---------------- Users (administrators) ----------------
-async function showUsers() {
+// Administrators add people, set their passwords (shown once, only to the administrator), activate or
+// deactivate accounts and decide who may view or download audit trails.
+async function showUsers(notice = '') {
   const users = await api('/api/users');
   const statusBadge = (u) => {
     if (u.lockedUntil && Date.parse(u.lockedUntil) > Date.now()) return '<span class="badge declined">locked</span>';
-    return { active: '<span class="badge completed">active</span>', invited: '<span class="badge sent">invited</span>', disabled: '<span class="badge voided">disabled</span>' }[u.status];
+    return { active: '<span class="badge completed">active</span>', invited: '<span class="badge sent">no password</span>', disabled: '<span class="badge voided">deactivated</span>' }[u.status];
   };
+  const permBox = (u, p, label) => u.role === 'admin'
+    ? `<label class="check" style="margin:0" title="Administrators always have this"><input type="checkbox" checked disabled> ${label}</label>`
+    : `<label class="check" style="margin:0"><input type="checkbox" data-perm="${p}" ${u.permissions?.[p] ? 'checked' : ''}> ${label}</label>`;
   app.innerHTML = `
-    <div class="wrap">
+    <div class="wrap" style="max-width:1200px">
       <div class="card" style="margin-bottom:16px">
         <h1>Users</h1>
-        <p class="muted small">Everyone who prepares or sends documents has their own account, signed in with their email, password and an emailed code. Signers don't need an account. Users are never deleted, only disabled, so the audit trail always shows who did what.</p>
-        <form id="addUser" class="row" style="flex-wrap:wrap;align-items:flex-end">
-          <div style="flex:1;min-width:160px"><label for="uName">Full name</label><input id="uName" required></div>
-          <div style="flex:1;min-width:200px"><label for="uEmail">Email (sign-in ID)</label><input id="uEmail" type="email" required></div>
-          <div><label for="uRole">Role</label><select id="uRole"><option value="sender">Sender</option><option value="admin">Administrator</option></select></div>
-          <button class="primary">Invite user</button>
+        <p class="muted small">Only administrators add users and set passwords. Each person signs in with their email, the password you give them, and a code emailed to them. Users can't change their own password; they ask you. Users are never deleted, only deactivated, so the audit trail always shows who did what.</p>
+        <form id="addUser">
+          <div class="row" style="flex-wrap:wrap;align-items:flex-end">
+            <div style="flex:1;min-width:160px"><label for="uName">Full name</label><input id="uName" required></div>
+            <div style="flex:1;min-width:200px"><label for="uEmail">Email (sign-in ID)</label><input id="uEmail" type="email" required></div>
+            <div><label for="uRole">Role</label><select id="uRole"><option value="sender">Sender</option><option value="admin">Administrator</option></select></div>
+          </div>
+          <div class="row" style="flex-wrap:wrap;align-items:flex-end;margin-top:4px">
+            <div style="flex:1;min-width:220px"><label for="uPw">Password</label><input id="uPw" type="text" autocomplete="off" spellcheck="false" placeholder="Type one, or click Generate"></div>
+            <button type="button" id="genPw">Generate</button>
+            <label class="check" style="margin:0 8px"><input type="checkbox" id="uView"> Can view audit trail</label>
+            <label class="check" style="margin:0 8px"><input type="checkbox" id="uDownload"> Can download audit trail</label>
+            <button class="primary">Add user</button>
+          </div>
         </form>
-        <div id="inviteLink"></div>
+        <div id="pwResult">${notice}</div>
       </div>
-      <div class="card" style="padding:0">
+      <div class="card" style="padding:0;overflow-x:auto">
         <table>
-          <thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Status</th><th>Last sign-in</th><th></th></tr></thead>
+          <thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Status</th><th>Audit trail access</th><th>Last sign-in</th><th></th></tr></thead>
           <tbody>${users.map((u) => `
             <tr data-id="${u.id}">
               <td><strong>${esc(u.name)}</strong>${u.id === me.user.id ? ' <span class="small muted">(you)</span>' : ''}</td>
               <td class="small">${esc(u.email)}</td>
               <td><select data-role ${u.id === me.user.id ? 'disabled' : ''}><option value="sender" ${u.role === 'sender' ? 'selected' : ''}>Sender</option><option value="admin" ${u.role === 'admin' ? 'selected' : ''}>Administrator</option></select></td>
               <td>${statusBadge(u)}</td>
+              <td class="small">${permBox(u, 'viewAudit', 'View')}${permBox(u, 'downloadAudit', 'Download')}</td>
               <td class="small muted">${u.lastLoginAt ? when(u.lastLoginAt) : '—'}</td>
               <td class="small" style="white-space:nowrap">
-                ${u.status === 'invited' ? '<button class="ghost small" data-act="resend-invite">Resend invite</button>' : ''}
-                ${u.status === 'active' && u.id !== me.user.id ? '<button class="ghost small" data-act="reset-password">Send reset link</button>' : ''}
+                <button class="ghost small" data-act="set-password">Set new password</button>
                 ${u.lockedUntil && Date.parse(u.lockedUntil) > Date.now() ? '<button class="ghost small" data-act="unlock">Unlock</button>' : ''}
-                ${u.id === me.user.id ? '' : u.status === 'disabled' ? '<button class="ghost small" data-act="enable">Enable</button>' : '<button class="ghost small danger" data-act="disable">Disable</button>'}
+                ${u.id === me.user.id ? '' : u.status === 'disabled' ? '<button class="ghost small" data-act="enable">Reactivate</button>' : '<button class="ghost small danger" data-act="disable">Deactivate</button>'}
               </td>
             </tr>`).join('')}</tbody>
         </table>
       </div>
     </div>`;
-  const showLink = (r, what) => {
-    $('#inviteLink').innerHTML = r.link
-      ? `<p class="small" style="margin-top:10px;color:var(--warn)">Email is off, so the ${what} link wasn't sent. Give this link to the person yourself (and only to them):</p><div class="linkbox"><input readonly value="${esc(r.link)}"><button data-copy>Copy</button></div>`
-      : `<p class="small" style="margin-top:10px;color:var(--ok)">✓ The ${what} link was emailed to ${esc(r.user.email)}.</p>`;
-    $('#inviteLink [data-copy]')?.addEventListener('click', () => navigator.clipboard.writeText(r.link).then(() => toast('Link copied')));
-  };
+
+  // A password is shown once, only here, for the administrator to give to the person privately.
+  const showPassword = (user, password) => `
+    <div class="card" style="margin-top:14px;border-color:#fde68a;background:#fffbeb">
+      <strong>Password for ${esc(user.name)} (${esc(user.email)})</strong>
+      <div class="linkbox"><input readonly value="${esc(password)}" style="font-family:Consolas,monospace;font-size:15px"><button data-copy-pw>Copy</button></div>
+      <p class="small muted" style="margin:6px 0 0">Shown only now: it is stored scrambled and can't be displayed again. Give it to the person privately (not in the same email as their sign-in ID). If it's lost, set a new one.</p>
+    </div>`;
+  const bindCopy = (password) => $('[data-copy-pw]')?.addEventListener('click', () => navigator.clipboard.writeText(password).then(() => toast('Password copied')));
+
+  $('#genPw').onclick = () => { $('#uPw').value = ''; $('#uPw').placeholder = 'A strong password will be generated'; $('#uPw').dataset.generate = '1'; };
+  $('#uPw').oninput = () => delete $('#uPw').dataset.generate;
   $('#addUser').onsubmit = async (e) => {
     e.preventDefault();
+    const generate = !!$('#uPw').dataset.generate || !$('#uPw').value;
     try {
-      const r = await api('/api/users', { method: 'POST', body: { name: $('#uName').value, email: $('#uEmail').value, role: $('#uRole').value } });
-      await showUsers();
-      showLink(r, 'invitation');
-    } catch (err) { toast(err.message, 4000); }
+      const r = await api('/api/users', { method: 'POST', body: {
+        name: $('#uName').value, email: $('#uEmail').value, role: $('#uRole').value,
+        password: $('#uPw').value, generate, permissions: { viewAudit: $('#uView').checked, downloadAudit: $('#uDownload').checked },
+      } });
+      await showUsers(showPassword(r.user, r.password));
+      bindCopy(r.password);
+      toast(`${r.user.name} added`);
+    } catch (err) { toast(err.message, 5000); }
   };
+
   app.querySelectorAll('tr[data-id]').forEach((tr) => {
     const uid = tr.dataset.id;
+    const u = users.find((x) => x.id === uid);
     tr.querySelector('[data-role]').onchange = async (e) => {
       try {
         await api(`/api/users/${uid}/role`, { method: 'POST', body: { role: e.target.value } });
         toast('Role changed');
+        showUsers();
       } catch (err) { toast(err.message, 4000); showUsers(); }
     };
+    tr.querySelectorAll('[data-perm]').forEach((box) => (box.onchange = async () => {
+      const body = Object.fromEntries([...tr.querySelectorAll('[data-perm]')].map((b) => [b.dataset.perm, b.checked]));
+      try {
+        await api(`/api/users/${uid}/permissions`, { method: 'POST', body });
+        toast('Access updated');
+      } catch (err) { toast(err.message, 4000); showUsers(); }
+    }));
     tr.querySelectorAll('[data-act]').forEach((b) => (b.onclick = async () => {
       const act = b.dataset.act;
-      if (act === 'disable' && !confirm('Disable this user? They are signed out immediately and can no longer sign in.')) return;
+      let body = {};
+      if (act === 'disable' && !confirm(`Deactivate ${u.name}? They are signed out immediately and can't sign in until reactivated.`)) return;
+      if (act === 'set-password') {
+        const typed = prompt(`New password for ${u.name}.\nType one (at least 10 characters, letters and numbers), or leave empty to generate a strong one:`, '');
+        if (typed === null) return;
+        body = typed ? { password: typed } : { generate: true };
+      }
       try {
-        const r = await api(`/api/users/${uid}/${act}`, { method: 'POST' });
-        await showUsers();
-        if (act === 'resend-invite') showLink(r, 'invitation');
-        if (act === 'reset-password') showLink(r, 'password reset');
-      } catch (err) { toast(err.message, 4000); }
+        const r = await api(`/api/users/${uid}/${act}`, { method: 'POST', body });
+        if (r.password) {
+          await showUsers(showPassword(r.user, r.password));
+          bindCopy(r.password);
+        } else {
+          await showUsers();
+          toast({ enable: 'User reactivated', disable: 'User deactivated', unlock: 'User unlocked' }[act] || 'Done');
+        }
+      } catch (err) { toast(err.message, 5000); }
     }));
   });
 }
@@ -295,8 +317,8 @@ async function showSystemLog() {
   app.innerHTML = `
     <div class="wrap">
       <div class="card">
-        <h1>System audit log</h1>
-        <p class="muted small">Actions not tied to one agreement: sign-ins, failed sign-in attempts, discarded drafts, test emails. Each agreement's own audit trail is on its page.</p>
+        <div class="row" style="justify-content:space-between;flex-wrap:wrap"><h1 style="margin:0">System audit log</h1><a class="btn" href="/api/system-log.pdf">⬇ Download PDF</a></div>
+        <p class="muted small">Actions not tied to one agreement: sign-ins, failed sign-in attempts, users, passwords and access changes, discarded drafts, downloads. Each agreement's own audit trail is on its page.</p>
         ${integrityHtml(integrity)}
         <table>
           <thead><tr><th>When</th><th>Who</th><th>What</th><th>IP / details</th></tr></thead>
@@ -349,13 +371,10 @@ function notify(docId, title, body) {
 async function showList() {
   app.innerHTML = `
     <div class="wrap">
-      <div class="card row" style="margin-bottom:16px;padding:12px 16px;flex-wrap:wrap;${me.mail ? '' : 'background:#fffbeb;border-color:#fde68a'}">
-        ${me.mail
-          ? `<span style="flex:1;min-width:220px">✉️ <strong>Email is on.</strong> Signers get their links by email${me.notify ? `, and status updates go to ${esc(me.notify)}` : ''}.</span>
-             <input id="testTo" type="email" placeholder="you@company.com" style="width:220px">
-             <button id="testBtn">Send test email</button>`
-          : `<span>⚠️ <strong>Email is off</strong>, so signers won't receive emails. Copy each signer's link from the document page, or add your email settings to the <code>.env</code> file and restart (see README).</span>`}
-      </div>
+      ${me.mail ? '' : `
+        <div class="card row" style="margin-bottom:16px;padding:12px 16px;background:#fffbeb;border-color:#fde68a">
+          <span>⚠️ <strong>Email is off</strong>: signers and sign-in codes can't be emailed. Ask your administrator to check the email settings.</span>
+        </div>`}
       ${'Notification' in window && Notification.permission === 'default' ? `
         <div class="card row" style="margin-bottom:16px;padding:10px 16px;flex-wrap:wrap" id="notifyBar">
           <span style="flex:1;min-width:220px">🔔 Get a desktop notification when someone signs or an agreement is completed.</span>
@@ -373,18 +392,6 @@ async function showList() {
         </table>
       </div>
     </div>`;
-  if ($('#testBtn')) {
-    $('#testBtn').onclick = async () => {
-      $('#testBtn').disabled = true;
-      try {
-        await api('/api/test-email', { method: 'POST', body: { to: $('#testTo').value } });
-        toast('Test email sent. Check your inbox (and junk folder).', 4000);
-      } catch (e) {
-        toast(e.message, 8000);
-      }
-      $('#testBtn').disabled = false;
-    };
-  }
   if ($('#notifyBtn')) {
     $('#notifyBtn').onclick = async () => {
       const result = await Notification.requestPermission();
@@ -1214,6 +1221,8 @@ function showDetail(doc) {
   const done = doc.status === 'completed';
   // Agreements are never deleted; while out for signature they can only be cancelled.
   actions.innerHTML = `
+    ${done ? `<a class="btn" href="/api/documents/${doc.id}/print.pdf?tz=${encodeURIComponent(Intl.DateTimeFormat().resolvedOptions().timeZone)}" target="_blank" title="A copy stamped PRINTED COPY with your name and the time on every page">🖨 Print copy</a>` : ''}
+    ${me.user.can.downloadAudit ? `<a class="btn" href="/api/documents/${doc.id}/audit.pdf" title="Download this agreement's audit trail as a PDF">⬇ Audit trail (PDF)</a>` : ''}
     ${done ? `<a class="btn primary" href="/api/documents/${doc.id}/signed">Download signed PDF</a>` : ''}
     ${doc.status === 'sent' ? '<button id="voidBtn" class="danger">Cancel agreement</button>' : ''}`;
   const sequential = doc.signingOrder === 'sequential';
@@ -1252,7 +1261,7 @@ function showDetail(doc) {
         </section>
         <section style="border:none">
           <h3>Audit trail</h3>
-          ${integrityHtml(doc.auditIntegrity)}
+          ${doc.auditHidden ? '<p class="small muted">🔒 You don\'t have access to view audit trails. An administrator can grant it.</p>' : integrityHtml(doc.auditIntegrity)}
           <ul class="events">${doc.events.slice().reverse().map((e) => `<li><span class="muted small">${when(e.at)}${e.actor ? ` · ${esc(e.actor)}` : ''}</span><br>${esc(e.text)}${e.detail ? `<br><span class="small muted">${esc(e.detail)}</span>` : ''}</li>`).join('')}</ul>
         </section>
         ${doc.comments?.length ? `<section style="border:none">

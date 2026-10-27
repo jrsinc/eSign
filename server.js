@@ -21,6 +21,7 @@ const { loadOrCreateCA, issueSignerCertificate } = require('./lib/pki');
 const Formula = require('./public/formula.js');
 const audit = require('./lib/audit');
 const authLib = require('./lib/auth');
+const reports = require('./lib/reports');
 const { inspectSignatures } = require('./lib/verifysig');
 
 const PORT = Number(process.env.PORT || 3000);
@@ -100,7 +101,9 @@ const saveSessions = () => {
   fs.writeFileSync(SESSIONS_FILE, JSON.stringify(Object.fromEntries(sessions)));
 };
 const challenges = new Map(); // pending two-step sign-ins: id -> { userId, codeHash, expires, attempts, sentAt }
-const publicUser = (u) => ({ id: u.id, email: u.email, name: u.name, role: u.role, status: u.status, createdAt: u.createdAt, lastLoginAt: u.lastLoginAt, lockedUntil: u.lockedUntil });
+const publicUser = (u) => ({ id: u.id, email: u.email, name: u.name, role: u.role, status: u.status, createdAt: u.createdAt, lastLoginAt: u.lastLoginAt, lockedUntil: u.lockedUntil, permissions: u.permissions || {}, can: { viewAudit: can(u, 'viewAudit'), downloadAudit: can(u, 'downloadAudit') } });
+// Administrators can do everything; other users only what an administrator granted them.
+const can = (u, permission) => u.role === 'admin' || !!u.permissions?.[permission];
 const actorOf = (u) => `${u.name} (${u.email})`;
 
 function requireUser(req, res, next) {
@@ -269,68 +272,14 @@ app.post('/api/logout', (req, res) => {
 app.get('/api/me', requireUser, (req, res) =>
   res.json({ company: COMPANY, mail: mailer.enabled(), notify: process.env.NOTIFY_EMAIL || '', dateFormats: DATE_FORMATS, reasons: REASONS, user: publicUser(req.user), idleMinutes: IDLE_MINUTES }));
 
-// ---------- Passwords: invitation, reset, change ----------
-async function emailAccountLink(user, kind, req) {
-  const token = authLib.newToken();
-  const hours = kind === 'invite' ? 7 * 24 : 1;
-  user[kind === 'invite' ? 'invite' : 'reset'] = { hash: authLib.hashSecret(token), expires: new Date(Date.now() + hours * 3600000).toISOString() };
-  store.save();
-  const link = `${BASE_URL}/account.html?t=${token}`;
-  const sent = await mailer.send({
-    to: user.email,
-    subject: kind === 'invite' ? `You're invited to ${COMPANY} eSign` : `Reset your ${COMPANY} eSign password`,
-    heading: kind === 'invite' ? `Welcome to ${COMPANY} eSign` : 'Reset your password',
-    text: kind === 'invite'
-      ? `Hello ${user.name},\n\n${req.user ? req.user.name : 'An administrator'} has created an account for you. Set your password to start sending documents for signature.\nThis link is valid for 7 days.`
-      : `Hello ${user.name},\n\nUse the button below to choose a new password. The link is valid for 1 hour and works once.\nIf you didn't ask for this, you can ignore this email.`,
-    link, linkLabel: kind === 'invite' ? 'SET MY PASSWORD' : 'RESET PASSWORD',
-  }).catch((e) => { console.error('Mail error:', e.message); return false; });
-  return { sent, link };
-}
+// ---------- Passwords ----------
+// Only administrators set passwords. A password an administrator sets or generates is shown to that
+// administrator once, to hand to the person privately; afterwards only its scrypt hash exists.
+// Users can't change or reset their own password; they ask an administrator.
+app.post('/api/password/forgot', (req, res) => res.status(403).json({ error: 'Please ask your administrator to set a new password for you.' }));
 
-// Set a password from an invitation or reset link (single use).
-app.post('/api/password/set', (req, res) => {
-  const hash = authLib.hashSecret(String(req.body.token || ''));
-  const user = store.users().find((u) => ['invite', 'reset'].some((k) => u[k]?.hash === hash && Date.parse(u[k].expires) > Date.now()));
-  if (!user || user.status === 'disabled') return res.status(400).json({ error: 'This link has expired or was already used. Ask for a new one.' });
-  const problem = authLib.passwordProblem(req.body.password, user);
-  if (problem) return res.status(400).json({ error: problem });
-  const wasInvite = user.invite?.hash === hash;
-  user.passwordHash = authLib.hashPassword(req.body.password);
-  user.status = 'active';
-  user.failed = 0;
-  user.lockedUntil = undefined;
-  delete user.invite;
-  delete user.reset;
-  // A new password signs the person out everywhere else.
-  for (const [k, s] of sessions) if (s.userId === user.id) sessions.delete(k);
-  saveSessions();
-  store.save();
-  req.actor = actorOf(user);
-  sysLog(req, 'password', wasInvite ? `${user.name} activated their account and set a password` : `${user.name} reset their password`);
-  res.json({ ok: true, email: user.email });
-});
-
-app.get('/api/password/link-info', (req, res) => {
-  const hash = authLib.hashSecret(String(req.query.t || ''));
-  const user = store.users().find((u) => ['invite', 'reset'].some((k) => u[k]?.hash === hash && Date.parse(u[k].expires) > Date.now()));
-  if (!user || user.status === 'disabled') return res.status(400).json({ error: 'This link has expired or was already used.' });
-  res.json({ company: COMPANY, name: user.name, email: user.email, kind: user.invite?.hash === hash ? 'invite' : 'reset' });
-});
-
-// "Forgot password?" Always answers the same, so it can't be used to find out which emails have accounts.
-app.post('/api/password/forgot', async (req, res) => {
-  if (tooManyAttempts(req)) return res.status(429).json({ error: 'Too many attempts. Please wait 15 minutes.' });
-  const user = store.getUserByEmail(String(req.body.email || ''));
-  if (user && user.status === 'active') {
-    req.actor = actorOf(user);
-    await emailAccountLink(user, 'reset', req);
-    sysLog(req, 'password', `Password reset link emailed to ${user.email}`);
-  }
-  res.json({ ok: true });
-});
-
-app.post('/api/password/change', requireUser, (req, res) => {
+// Administrators may change their own password.
+app.post('/api/password/change', requireUser, requireAdminRole, (req, res) => {
   if (!authLib.verifyPassword(req.body.current, req.user.passwordHash)) {
     sysLog(req, 'login_failed', `Password change refused for ${req.user.email}: current password wrong`);
     return res.status(400).json({ error: 'Your current password is not correct.' });
@@ -342,11 +291,19 @@ app.post('/api/password/change', requireUser, (req, res) => {
   for (const [k, s] of sessions) if (s.userId === req.user.id && k !== req.cookies.sid) sessions.delete(k);
   saveSessions();
   store.save();
-  sysLog(req, 'password', `${req.user.name} changed their password`);
+  sysLog(req, 'password', `${req.user.name} changed their own password`);
   res.json({ ok: true });
 });
 
+// Password chosen by the administrator, or a generated one when `generate` is set.
+function adminPassword(body, person) {
+  if (body.generate) return { password: authLib.generatePassword() };
+  const problem = authLib.passwordProblem(body.password, person);
+  return problem ? { error: problem } : { password: String(body.password) };
+}
+
 // ---------- User management (administrators) ----------
+const PERMISSIONS = ['viewAudit', 'downloadAudit'];
 app.get('/api/users', requireUser, requireAdminRole, (req, res) => res.json(store.users().map(publicUser)));
 
 app.post('/api/users', requireUser, requireAdminRole, async (req, res) => {
@@ -356,12 +313,19 @@ app.post('/api/users', requireUser, requireAdminRole, async (req, res) => {
   if (!name) return res.status(400).json({ error: 'Please enter the person\'s name.' });
   if (!isEmail(email)) return res.status(400).json({ error: 'Please enter a valid email address.' });
   if (store.getUserByEmail(email)) return res.status(400).json({ error: 'A user with this email already exists. Each person has one account.' });
-  const user = { id: id(8), email, name, role, status: 'invited', createdAt: now(), createdBy: req.user.id, failed: 0 };
+  const pw = adminPassword(req.body, { email, name });
+  if (pw.error) return res.status(400).json({ error: pw.error });
+  const permissions = Object.fromEntries(PERMISSIONS.map((p) => [p, !!req.body.permissions?.[p]]));
+  const user = { id: id(8), email, name, role, status: 'active', passwordHash: authLib.hashPassword(pw.password), permissions, createdAt: now(), createdBy: req.user.id, failed: 0 };
   store.addUser(user);
-  const { sent, link } = await emailAccountLink(user, 'invite', req);
-  sysLog(req, 'user', `User invited: ${actorOf(user)} as ${role}`);
-  // The link is shown only when email is off; otherwise only the invited person receives it.
-  res.json({ user: publicUser(user), emailed: sent, link: sent ? undefined : link });
+  sysLog(req, 'user', `User created: ${actorOf(user)} as ${role}`, `Permissions: ${PERMISSIONS.filter((p) => permissions[p]).join(', ') || 'none'}. Password set by ${req.user.name}.`);
+  // Tell the person they have an account, without the password (the administrator gives it to them).
+  mailer.send({
+    to: email, subject: `Your ${COMPANY} eSign account`, heading: `Welcome to ${COMPANY} eSign`,
+    text: `Hello ${name},\n\n${req.user.name} has created an account for you.\nYour sign-in ID is: ${email}\n\nYour administrator will give you your password. When you sign in, we will also email you a one-time code.`,
+    link: BASE_URL, linkLabel: 'OPEN ESIGN',
+  }).catch((e) => console.error('Mail error:', e.message));
+  res.json({ user: publicUser(user), password: pw.password });
 });
 
 app.post('/api/users/:id/:action', requireUser, requireAdminRole, async (req, res) => {
@@ -369,17 +333,21 @@ app.post('/api/users/:id/:action', requireUser, requireAdminRole, async (req, re
   if (!user) return res.status(404).json({ error: 'User not found' });
   const self = user.id === req.user.id;
   const admins = store.users().filter((u) => u.role === 'admin' && u.status === 'active');
+  const signOut = () => {
+    for (const [k, s] of sessions) if (s.userId === user.id) sessions.delete(k);
+    saveSessions();
+  };
+  let password;
   switch (req.params.action) {
     case 'disable':
-      if (self) return res.status(400).json({ error: "You can't disable your own account." });
+      if (self) return res.status(400).json({ error: "You can't deactivate your own account." });
       user.status = 'disabled';
-      for (const [k, s] of sessions) if (s.userId === user.id) sessions.delete(k);
-      saveSessions();
-      sysLog(req, 'user', `User disabled: ${actorOf(user)}`);
+      signOut();
+      sysLog(req, 'user', `User deactivated: ${actorOf(user)}`);
       break;
     case 'enable':
-      user.status = user.passwordHash ? 'active' : 'invited';
-      sysLog(req, 'user', `User re-enabled: ${actorOf(user)}`);
+      user.status = 'active';
+      sysLog(req, 'user', `User reactivated: ${actorOf(user)}`);
       break;
     case 'unlock':
       user.lockedUntil = undefined;
@@ -394,43 +362,30 @@ app.post('/api/users/:id/:action', requireUser, requireAdminRole, async (req, re
       user.role = role;
       break;
     }
-    case 'resend-invite': {
-      if (user.status !== 'invited') return res.status(400).json({ error: 'This user has already activated their account.' });
-      const r = await emailAccountLink(user, 'invite', req);
-      sysLog(req, 'user', `Invitation re-sent to ${user.email}`);
-      store.save();
-      return res.json({ user: publicUser(user), emailed: r.sent, link: r.sent ? undefined : r.link });
+    case 'permissions': {
+      const before = user.permissions || {};
+      user.permissions = Object.fromEntries(PERMISSIONS.map((p) => [p, !!req.body[p]]));
+      const changes = PERMISSIONS.filter((p) => !!before[p] !== user.permissions[p]).map((p) => `${user.permissions[p] ? 'granted' : 'removed'} ${{ viewAudit: 'view audit trail', downloadAudit: 'download audit trail' }[p]}`);
+      if (changes.length) sysLog(req, 'user', `Access for ${actorOf(user)}: ${changes.join(', ')}`);
+      break;
     }
-    case 'reset-password': {
-      if (user.status !== 'active') return res.status(400).json({ error: 'Only active users can reset their password.' });
-      const r = await emailAccountLink(user, 'reset', req);
-      sysLog(req, 'user', `Password reset link sent to ${user.email} by ${req.user.name}`);
-      store.save();
-      return res.json({ user: publicUser(user), emailed: r.sent, link: r.sent ? undefined : r.link });
+    case 'set-password': {
+      const pw = adminPassword(req.body, user);
+      if (pw.error) return res.status(400).json({ error: pw.error });
+      password = pw.password;
+      user.passwordHash = authLib.hashPassword(password);
+      user.failed = 0;
+      user.lockedUntil = undefined;
+      if (user.status === 'invited') user.status = 'active';
+      if (!self) signOut(); // a new password signs the person out everywhere
+      sysLog(req, 'password', `New password set for ${actorOf(user)} by ${req.user.name}`);
+      break;
     }
     default:
       return res.status(404).json({ error: 'Unknown action' });
   }
   store.save();
-  res.json({ user: publicUser(user) });
-});
-
-app.post('/api/test-email', requireUser, async (req, res) => {
-  if (!mailer.enabled()) return res.status(400).json({ error: 'Email is off. Add your SMTP settings to the .env file and restart.' });
-  const to = String(req.body.to || '').trim();
-  if (!isEmail(to)) return res.status(400).json({ error: 'Enter a valid email address.' });
-  try {
-    await mailer.send({ to, subject: `${COMPANY} eSign test email`, heading: 'Email is working', text: 'Your e-signature system can send email. Signers will now receive their signing links automatically.' });
-    sysLog(req, 'email', `Test email sent to ${to}`);
-    res.json({ ok: true });
-  } catch (e) {
-    const loginRejected = e.responseCode === 535 || e.code === 'EAUTH';
-    res.status(400).json({
-      error: loginRejected
-        ? 'The mail server rejected the login. For Gmail, SMTP_PASS must be a Google App Password (not your normal password), and 2-Step Verification must be on.'
-        : `Sending failed: ${e.message}`,
-    });
-  }
+  res.json({ user: publicUser(user), ...(password ? { password } : {}) });
 });
 
 // Status emails to the sender, like DocuSign's "X has signed" notices.
@@ -460,15 +415,20 @@ async function mergePdfs(buffers) {
 }
 
 // ---------- Admin: documents ----------
-function adminView(doc) {
+// What the dashboard may see of an agreement. The audit trail is included only for administrators
+// and for users an administrator gave "view audit trail" access.
+function adminView(doc, req) {
   const { sources, ...rest } = doc;
+  const seeAudit = can(req.user, 'viewAudit');
   return {
     ...rest,
     // A signer only has a link once it is their turn (see issueLinks).
     signers: doc.signers.map(({ token, ...s }) => ({ ...s, link: token && doc.status === 'sent' ? signLink({ token }) : null })),
     fields: doc.fields.map((f) => ({ ...f, value: f.type === 'signature' || f.type === 'initials' ? (f.value ? '[signed]' : null) : f.value })),
     comments: doc.comments || [],
-    auditIntegrity: audit.verify(doc.events),
+    events: seeAudit ? doc.events : [],
+    auditIntegrity: seeAudit ? audit.verify(doc.events) : null,
+    auditHidden: !seeAudit,
   };
 }
 
@@ -510,13 +470,13 @@ app.post('/api/documents', requireUser, upload.array('file', 20), async (req, re
   log(doc, `Document created by ${req.user.name} (${req.user.email})`, req, 'created');
   if (req.files.length > 1) log(doc, `${req.files.length} files merged: ${req.files.map((f) => f.originalname).join(', ')}`, req, 'pages');
   store.insert(doc);
-  res.json(adminView(doc));
+  res.json(adminView(doc, req));
 });
 
 app.get('/api/documents/:id', requireUser, (req, res) => {
   const doc = store.get(req.params.id);
   if (!doc) return res.status(404).json({ error: 'Not found' });
-  res.json(adminView(doc));
+  res.json(adminView(doc, req));
 });
 
 function cleanField(f) {
@@ -581,7 +541,7 @@ app.put('/api/documents/:id', requireUser, (req, res) => {
   // Typing in a box saves repeatedly; identical summaries within 2 minutes are recorded once.
   if (changes.length && !(last?.type === 'edit' && last.text === text && Date.now() - Date.parse(last.at) < 120000)) log(doc, text, req, 'edit');
   store.save();
-  res.json(adminView(doc));
+  res.json(adminView(doc, req));
 });
 
 // Human-readable list of what changed in a draft, for the audit trail.
@@ -675,6 +635,45 @@ app.post('/api/documents/:id/comments/:cid/resolve', requireUser, (req, res) => 
   res.json(c);
 });
 
+const sendFile = (res, bytes, name, type = 'application/pdf') => {
+  res.setHeader('Content-Type', type);
+  res.setHeader('Content-Disposition', `attachment; filename="${name.replace(/[^\w.\- ]/g, '_')}"`);
+  res.send(bytes);
+};
+
+// Audit trail of one agreement as a PDF: administrators, or users given "download audit trail".
+app.get('/api/documents/:id/audit.pdf', requireUser, async (req, res) => {
+  const doc = store.get(req.params.id);
+  if (!doc) return res.status(404).json({ error: 'Not found' });
+  if (!can(req.user, 'downloadAudit')) return res.status(403).json({ error: 'You do not have access to download audit trails. Ask an administrator.' });
+  const bytes = await reports.auditTrailPdf(doc, COMPANY, { generatedBy: req.actor, integrity: audit.verify(doc.events) });
+  log(doc, `Audit trail downloaded as PDF by ${req.actor}`, req, 'download');
+  store.save();
+  sendFile(res, bytes, `${doc.agreementId || doc.title} - audit trail.pdf`);
+});
+
+// Stamped print copy of a completed agreement. The locked original is not changed.
+app.get('/api/documents/:id/print.pdf', requireUser, async (req, res) => {
+  const doc = store.get(req.params.id);
+  if (!doc?.finalFile) return res.status(404).json({ error: 'Only completed agreements can be printed.' });
+  const tz = validTz(String(req.query.tz || 'UTC'));
+  const bytes = await reports.printCopyPdf(fs.readFileSync(filePath(doc.finalFile)), doc, { printedBy: req.actor, tz, verifyUrl: `${BASE_URL}/verify.html` });
+  log(doc, `Print copy made by ${req.actor}`, req, 'download', `${auditStamp(now())} - IP address: ${clientIp(req)} - Every page stamped "PRINTED COPY"; the electronic original is unchanged`);
+  store.save();
+  res.setHeader('Content-Type', 'application/pdf');
+  res.setHeader('Content-Disposition', `inline; filename="${`${doc.agreementId} - printed copy.pdf`.replace(/[^\w.\- ]/g, '_')}"`);
+  res.send(bytes);
+});
+
+// System log as a PDF (administrators only).
+app.get('/api/system-log.pdf', requireUser, requireAdminRole, async (req, res) => {
+  const entries = syslog.read();
+  const integrity = audit.verify(entries);
+  const bytes = await reports.systemLogPdf(entries, COMPANY, { generatedBy: req.actor, integrity });
+  sysLog(req, 'download', `System audit log downloaded as PDF by ${req.user.name} (${entries.length} entries)`);
+  sendFile(res, bytes, `System audit log ${new Date().toISOString().slice(0, 10)}.pdf`);
+});
+
 // System log (sign-ins, discarded drafts, test emails) with its integrity check.
 app.get('/api/system-log', requireUser, requireAdminRole, (req, res) => {
   const entries = syslog.read();
@@ -760,7 +759,7 @@ app.post('/api/documents/:id/pages', requireUser, async (req, res) => {
   fs.writeFileSync(filePath(doc.originalFile), bytes);
   log(doc, `Pages organized: document now has ${plan.length} page${plan.length > 1 ? 's' : ''}`, req, 'pages');
   store.save();
-  res.json(adminView(doc));
+  res.json(adminView(doc, req));
 });
 
 // ---------- Sending ----------
@@ -824,7 +823,7 @@ app.post('/api/documents/:id/send', requireUser, async (req, res) => {
   store.save();
   for (const s of first) await invite(doc, s);
   store.save();
-  res.json(adminView(doc));
+  res.json(adminView(doc, req));
 });
 
 app.post('/api/documents/:id/remind/:signerId', requireUser, async (req, res) => {
@@ -868,7 +867,7 @@ app.post('/api/documents/:id/void', requireUser, async (req, res) => {
   if (notified.length) log(doc, `Cancellation notice emailed to ${notified.join(', ')}`, null, 'emailed');
   await notifySender(`Cancelled: "${doc.title}" [${doc.agreementId}]`, `You cancelled agreement ${doc.agreementId} "${doc.title}".\nReason: ${reason}\n${notified.length ? `Notified: ${notified.join(', ')}` : 'Email is off, so signers were not notified by email.'}`, undefined, doc);
   store.save();
-  res.json({ ...adminView(doc), notified: notified.length });
+  res.json({ ...adminView(doc, req), notified: notified.length });
 });
 
 // Automatic reminders (Adobe's "Send reminder: Every day").
