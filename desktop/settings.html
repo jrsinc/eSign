@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src 'self'">
-  <title>JRS eSign settings</title>
+  <title>Method365 settings</title>
   <style>
     body { font: 14px/1.5 "Segoe UI", Arial, Helvetica, sans-serif; margin: 0; padding: 24px; color: #1f2937; background: #f4f6fa; }
     h1 { font-size: 18px; margin: 0 0 4px; }
@@ -20,7 +20,7 @@
 <body>
   <h1>Settings</h1>
   <div class="muted" id="version"></div>
-  <label for="url">eSign server address</label>
+  <label for="url">Method365 server address</label>
   <input type="url" id="url" placeholder="https://sign.yourcompany.com" spellcheck="false">
   <div class="muted">The same address people use in the web browser. All data stays on that server.</div>
   <div id="msg"></div>
@@ -34,7 +34,7 @@
       const s = await window.esignDesktop.getSettings();
       document.getElementById('url').value = s.serverUrl;
       document.getElementById('tray').checked = s.closeToTray !== false;
-      document.getElementById('version').textContent = `JRS eSign desktop ${s.version}`;
+      document.getElementById('version').textContent = `Method365 desktop ${s.version}`;
     })();
     document.getElementById('save').onclick = async () => {
       const r = await window.esignDesktop.saveSettings({ serverUrl: document.getElementById('url').value, closeToTray: document.getElementById('tray').checked });

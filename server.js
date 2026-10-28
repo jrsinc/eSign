@@ -27,7 +27,7 @@ const { inspectSignatures } = require('./lib/verifysig');
 const PORT = Number(process.env.PORT || 3000);
 const BASE_URL = (process.env.BASE_URL || `http://localhost:${PORT}`).replace(/\/$/, '');
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'admin';
-const COMPANY = mailer.COMPANY;
+const { COMPANY, APP_NAME } = require('./lib/brand');
 const SENDER_EMAIL = process.env.NOTIFY_EMAIL || process.env.MAIL_FROM || '';
 // The app's own certificate authority for digital signatures (created on first run in data/pki).
 let CA = loadOrCreateCA(path.join(store.DATA_DIR, 'pki'), COMPANY);
@@ -184,14 +184,21 @@ async function sendOtp(user, challengeId, req) {
   challenges.set(challengeId, { userId: user.id, codeHash: authLib.hashSecret(code, challengeId), expires: Date.now() + OTP_MINUTES * 60000, attempts: 0, sentAt: Date.now() });
   await mailer.send({
     to: user.email,
-    subject: `${COMPANY} eSign sign-in code`,
+    subject: `${APP_NAME} sign-in code`,
     heading: 'Your sign-in code',
     text: `Hello ${user.name},\n\nYour one-time sign-in code is:\n\n${code}\n\nIt expires in ${OTP_MINUTES} minutes and can be used once.\nIf you did not try to sign in, someone may know your password: change it and tell your administrator.`,
   });
   sysLog(req, 'otp', `Sign-in code emailed to ${user.email}`);
 }
 
-app.get('/api/auth/status', (req, res) => res.json({ company: COMPANY, setupRequired: store.users().length === 0, mail: mailer.enabled() }));
+// The policy page (policy.html): names and contact filled in from settings. Signers consent to this
+// version of the Electronic Record and Signature Disclosure; the version is recorded with each signature.
+const POLICY_VERSION = '1.0';
+const POLICY_EFFECTIVE = '28-Oct-2026';
+const SUPPORT_EMAIL = process.env.SUPPORT_EMAIL || process.env.MAIL_FROM || process.env.SMTP_USER || '';
+app.get('/api/policy-info', (req, res) => res.json({ app: APP_NAME, company: COMPANY, contact: SUPPORT_EMAIL, version: POLICY_VERSION, effective: POLICY_EFFECTIVE, baseUrl: BASE_URL }));
+
+app.get('/api/auth/status', (req, res) => res.json({ company: COMPANY, app: APP_NAME, setupRequired: store.users().length === 0, mail: mailer.enabled() }));
 
 // First-time setup: the .env ADMIN_PASSWORD proves ownership once, to create the first administrator.
 app.post('/api/auth/setup', (req, res) => {
@@ -311,7 +318,7 @@ app.post('/api/logout', (req, res) => {
 });
 
 app.get('/api/me', requireUser, (req, res) =>
-  res.json({ company: COMPANY, mail: mailer.enabled(), notify: process.env.NOTIFY_EMAIL || '', dateFormats: DATE_FORMATS, reasons: REASONS, user: publicUser(req.user), idleMinutes: IDLE_MINUTES }));
+  res.json({ company: COMPANY, app: APP_NAME, mail: mailer.enabled(), notify: process.env.NOTIFY_EMAIL || '', dateFormats: DATE_FORMATS, reasons: REASONS, user: publicUser(req.user), idleMinutes: IDLE_MINUTES }));
 
 // ---------- Passwords ----------
 // Only administrators set passwords. A password an administrator sets or generates is shown to that
@@ -362,7 +369,7 @@ app.post('/api/users', requireUser, requireAdminRole, async (req, res) => {
   sysLog(req, 'user', `User created: ${actorOf(user)} as ${role}`, `Permissions: ${PERMISSIONS.filter((p) => permissions[p]).join(', ') || 'none'}. Password set by ${req.user.name} and emailed to the user.`);
   // Welcome email with the sign-in ID and password. Signing in also needs the one-time code we email each time.
   mailer.send({
-    to: email, subject: `Your ${COMPANY} eSign account`, heading: `Welcome to ${COMPANY} eSign`,
+    to: email, subject: `Your ${APP_NAME} account`, heading: `Welcome to ${APP_NAME}`,
     text: `Hello ${name},\n\n${req.user.name} has created an account for you.`,
     details: [['Sign-in ID', email], ['Password', pw.password]],
     after: 'When you sign in, we will also email you a one-time code.\n\nKeep your password private and delete this email once you have noted it. Only your administrator can change your password.',
@@ -442,9 +449,9 @@ app.post('/api/users/:id/:action', requireUser, requireAdminRole, async (req, re
       user.email = email;
       if (email !== oldEmail) {
         // Tell both addresses, so the person notices if the change wasn't expected.
-        const text = `Hello ${name},\n\n${req.user.name} changed your ${COMPANY} eSign sign-in ID from ${oldEmail} to ${email}.\n\nFrom now on, sign in with ${email} and your existing password. Your sign-in codes will be sent to ${email}.\n\nIf you didn't expect this, contact your administrator.`;
+        const text = `Hello ${name},\n\n${req.user.name} changed your ${APP_NAME} sign-in ID from ${oldEmail} to ${email}.\n\nFrom now on, sign in with ${email} and your existing password. Your sign-in codes will be sent to ${email}.\n\nIf you didn't expect this, contact your administrator.`;
         for (const to of [oldEmail, email]) {
-          mailer.send({ to, subject: `Your ${COMPANY} eSign sign-in ID has changed`, heading: 'Sign-in ID changed', text, link: BASE_URL, linkLabel: 'OPEN ESIGN' })
+          mailer.send({ to, subject: `Your ${APP_NAME} sign-in ID has changed`, heading: 'Sign-in ID changed', text, link: BASE_URL, linkLabel: `OPEN ${APP_NAME.toUpperCase()}` })
             .catch((e) => console.error('Mail error:', e.message));
         }
       }
@@ -520,7 +527,7 @@ function makeBackup(createdBy) {
   return require('zlib').gzipSync(JSON.stringify(body));
 }
 const backupCounts = (db) => ({ agreements: (db.documents || []).length, users: (db.users || []).length, companies: (db.companies || []).length });
-const backupName = (at = new Date()) => `${COMPANY.replace(/[^\w-]/g, '_')}-eSign-backup-${at.toISOString().slice(0, 19).replace(/[T:]/g, '-')}.esbackup`;
+const backupName = (at = new Date()) => `${COMPANY.replace(/[^\w-]/g, '_')}-${APP_NAME.replace(/[^\w-]/g, '_')}-backup-${at.toISOString().slice(0, 19).replace(/[T:]/g, '-')}.esbackup`;
 
 // Reads and checks an uploaded backup; throws a readable error if it isn't a complete, unchanged backup.
 function readBackup(buf) {
@@ -528,9 +535,9 @@ function readBackup(buf) {
   try {
     body = JSON.parse(require('zlib').gunzipSync(buf).toString('utf8'));
   } catch {
-    throw Object.assign(new Error('This is not an eSign backup file.'), { status: 400 });
+    throw Object.assign(new Error(`This is not a ${APP_NAME} backup file.`), { status: 400 });
   }
-  if (body?.format !== BACKUP_FORMAT || !body.files || typeof body.files !== 'object') throw Object.assign(new Error('This is not an eSign backup file.'), { status: 400 });
+  if (body?.format !== BACKUP_FORMAT || !body.files || typeof body.files !== 'object') throw Object.assign(new Error(`This is not a ${APP_NAME} backup file.`), { status: 400 });
   if (body.checksum !== filesChecksum(body.files)) throw Object.assign(new Error('This backup is damaged or was changed after it was made, so it can\'t be restored.'), { status: 400 });
   for (const rel of Object.keys(body.files)) {
     if (rel.includes('\\') || rel.split('/').some((p) => !p || p === '.' || p === '..') || path.isAbsolute(rel) || SKIP_IN_BACKUP.has(rel)) {
@@ -1118,7 +1125,7 @@ app.get('/api/documents/:id/signed', requireUser, (req, res) => {
 // Public root certificate: import it into Adobe / Windows so these digital signatures show as trusted.
 app.get('/ca.cer', (req, res) => {
   res.setHeader('Content-Type', 'application/x-x509-ca-cert');
-  res.setHeader('Content-Disposition', `attachment; filename="${COMPANY.replace(/[^\w-]/g, '_')}-eSign-Root-CA.cer"`);
+  res.setHeader('Content-Disposition', `attachment; filename="${COMPANY.replace(/[^\w-]/g, '_')}-${APP_NAME.replace(/[^\w-]/g, '_')}-Root-CA.cer"`);
   res.send(fs.readFileSync(CA.certFile));
 });
 
@@ -1189,7 +1196,7 @@ function identityBlocked(req, res, doc, signer) {
     log(doc, `Access refused: signing link for ${who(signer)} opened while signed in as ${idn.loggedInAs}`, req, 'failed');
     store.save();
   }
-  res.status(403).json({ error, identity: { reason: idn.reason, invitedEmail: signer.email, loggedInAs: idn.loggedInAs }, company: COMPANY, title: doc.title, agreementId: doc.agreementId });
+  res.status(403).json({ error, identity: { reason: idn.reason, invitedEmail: signer.email, loggedInAs: idn.loggedInAs }, company: COMPANY, app: APP_NAME, title: doc.title, agreementId: doc.agreementId });
   return null;
 }
 
@@ -1258,7 +1265,7 @@ app.get('/api/sign/:token', async (req, res) => {
   const { doc, signer } = ctx;
   if (signer.status === 'signed') {
     return res.json({
-      company: COMPANY, title: doc.title, agreementId: doc.agreementId, status: doc.status, expired: true,
+      company: COMPANY, app: APP_NAME, title: doc.title, agreementId: doc.agreementId, status: doc.status, expired: true,
       signer: { name: signer.name, status: 'signed', signedAt: signer.signedAt },
       // After signing without an account, the person may ask for one.
       canRequestAccount: !store.getUserByEmail(signer.email) && !signer.accountRequestedAt,
@@ -1287,6 +1294,7 @@ app.get('/api/sign/:token', async (req, res) => {
   }
   res.json({
     company: COMPANY,
+    app: APP_NAME,
     companies: companyNames(),
     title: doc.title,
     agreementId: doc.agreementId,
@@ -1368,7 +1376,7 @@ app.post('/api/sign/:token/request-account', async (req, res) => {
     await mailer.send({
       to: admin.email, subject: `Account request: ${signer.name}`, heading: 'Account request',
       text: `${who(signer)} signed agreement ${doc.agreementId} "${doc.title}" and asked for an account for future documents.\n\nTo give them one, add them on the Users page. If you don't, they can still sign future documents with a temporary password.`,
-      link: BASE_URL, linkLabel: 'OPEN ESIGN',
+      link: BASE_URL, linkLabel: `OPEN ${APP_NAME.toUpperCase()}`,
     }).catch((e) => console.error('Mail error:', e.message));
   }
   res.json({ ok: true });
@@ -1391,12 +1399,12 @@ async function buildFinalPdf(doc) {
       const cert = issueSignerCertificate(CA, { name: s.name, email: s.email, title: s.title, company: s.company });
       certs[s.id] = cert;
       s.certificate = { serial: cert.serial, dn: cert.dn, pem: cert.certPem };
-      log(doc, `Digital certificate issued to ${who(s)}`, null, 'signed', `Certificate serial: ${cert.serial} - Subject: ${cert.dn} - Issuer: ${COMPANY} eSign Root CA - Algorithm: RSA 2048 / SHA-256`);
+      log(doc, `Digital certificate issued to ${who(s)}`, null, 'signed', `Certificate serial: ${cert.serial} - Subject: ${cert.dn} - Issuer: ${CA.cert.subject.getField('CN')?.value || 'Root CA'} - Algorithm: RSA 2048 / SHA-256`);
     }
     // Company seal that certifies and locks the finished agreement.
     const sealEmail = SENDER_EMAIL || 'esign@localhost';
-    certs.seal = { ...issueSignerCertificate(CA, { name: `${COMPANY} eSign`, email: sealEmail, company: COMPANY, title: 'Document certification' }), name: `${COMPANY} eSign`, email: sealEmail };
-    log(doc, `Document certified and locked by ${COMPANY} eSign`, null, 'signed',
+    certs.seal = { ...issueSignerCertificate(CA, { name: `${COMPANY} ${APP_NAME}`, email: sealEmail, company: COMPANY, title: 'Document certification' }), name: `${COMPANY} ${APP_NAME}`, email: sealEmail };
+    log(doc, `Document certified and locked by ${COMPANY} ${APP_NAME}`, null, 'signed',
       `No changes allowed except signing (DocMDP level 2). Any other change invalidates the certification. Certificate serial: ${certs.seal.serial}`);
   }
   log(doc, 'Agreement completed.', null, 'completed');
@@ -1592,6 +1600,7 @@ app.post('/api/sign/:token', async (req, res) => {
     status: 'signed', signedAt: signedAt.toISOString(), consentAt: signedAt.toISOString(), tz, reason, appearance,
     ip: clientIp(req), userAgent: String(req.headers['user-agent'] || '').slice(0, 300),
     authMethod: idn.flow === 'account' ? 'account-password' : 'temporary-password',
+    consentPolicy: POLICY_VERSION,
   });
   const sigValue = (type) => doc.fields.find((f) => f.signerId === signer.id && f.type === type && f.value)?.value;
   store.saveProfile(signer.email, {
@@ -1600,7 +1609,7 @@ app.post('/api/sign/:token', async (req, res) => {
     ...(sigValue('signature') ? { signature: sigValue('signature') } : {}), ...(sigValue('initials') ? { initials: sigValue('initials') } : {}),
   });
   log(doc, `Document e-signed by ${who(signer)}`, req, 'signed',
-    `Signature Date: ${auditStamp(signer.signedAt)} - Time Source: server- IP address: ${signer.ip} - Device: ${deviceOf(signer.userAgent)} - Identity: signer email matches invited email - Authentication: ${authText} - Signature Appearance Selected: ${appearance}${reason ? ` - Reason: ${reason}` : ''}`);
+    `Signature Date: ${auditStamp(signer.signedAt)} - Time Source: server- IP address: ${signer.ip} - Device: ${deviceOf(signer.userAgent)} - Consent: Electronic Record and Signature Disclosure v${POLICY_VERSION} - Identity: signer email matches invited email - Authentication: ${authText} - Signature Appearance Selected: ${appearance}${reason ? ` - Reason: ${reason}` : ''}`);
 
   if (doc.signers.every((s) => s.status === 'signed')) {
     doc.completedAt = now();
@@ -1703,7 +1712,7 @@ function autoBackup() {
 }
 
 const server = app.listen(PORT, () => {
-  console.log(`${COMPANY} eSign running at ${BASE_URL}  (email ${mailer.enabled() ? 'ON' : 'OFF - links print here'}${PRODUCTION ? ', production' : ''})`);
+  console.log(`${APP_NAME} (${COMPANY}) running at ${BASE_URL}  (email ${mailer.enabled() ? 'ON' : 'OFF - links print here'}${PRODUCTION ? ', production' : ''})`);
   setTimeout(() => sendDueReminders().catch((e) => console.error('Reminder error:', e)), 60 * 1000);
   if (AUTO_BACKUP_HOURS > 0) {
     setTimeout(autoBackup, Math.min(5 * 60 * 1000, AUTO_BACKUP_HOURS * 3600 * 1000));

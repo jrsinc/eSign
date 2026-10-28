@@ -110,6 +110,18 @@ tr.click { cursor: pointer; } tr.click:hover td { background: #f9fafb; }
 .identity { margin-top: 12px; padding: 10px 12px; border-radius: 8px; background: #eff6ff; border: 1px solid #bfdbfe; font-size: 13px; }
 .identity input[readonly] { background: #fff; margin: 4px 0; max-width: 360px; }
 .identity.warn { background: #fef2f2; border-color: #fecaca; color: #991b1b; }
+.policy { max-width: 820px; }
+.policy .card { margin-bottom: 16px; scroll-margin-top: 80px; }
+.policy h2 { color: var(--brand); }
+.policy h3 { text-transform: none; letter-spacing: 0; font-size: 15px; color: var(--ink); margin: 16px 0 6px; }
+.policy p, .policy li { line-height: 1.65; }
+.policy ul { padding-left: 20px; margin: 6px 0; }
+.policy li { margin: 4px 0; }
+.policy-toc { display: grid; gap: 4px; margin-top: 12px; }
+.policy-toc a { text-decoration: none; padding: 4px 0; }
+.policy-toc a:hover { text-decoration: underline; }
+.site-foot { text-align: center; font-size: 12px; color: var(--muted); padding: 18px 16px 28px; }
+.site-foot a { color: var(--muted); }
 .pw-wrap { position: relative; display: block; }
 .pw-wrap input { padding-right: 64px; }
 .pw-toggle { position: absolute; right: 4px; top: 50%; transform: translateY(-50%); border: 0; background: transparent; color: var(--brand); font-size: 12px; font-weight: 600; padding: 4px 8px; cursor: pointer; }

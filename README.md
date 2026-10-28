@@ -1,4 +1,6 @@
-# JRS eSign
+# Method365
+
+Electronic signatures for JRS.
 
 A self-hosted electronic signature system: upload a PDF, place signature fields, send it to signers, and get back a digitally signed, locked PDF with an audit report.
 
@@ -11,6 +13,7 @@ A self-hosted electronic signature system: upload a PDF, place signature fields,
 - **Signer identity**: only the invited recipient can sign. Account holders sign in and re-enter their password; outside recipients get a one-time temporary password by email. Wrong passwords lock signing and notify the sender.
 - **Completed PDF**: values stamped onto the pages, a signature page per signer, an Adobe-style audit report, certificate-based digital signatures and a certification lock.
 - **Tamper check**: `/verify.html` checks a signed PDF against the records and its embedded signatures.
+- **Policies**: `/policy.html` holds the Electronic Record and Signature Disclosure, privacy policy, retention and terms of use. Signers agree to the disclosure before signing, and its version is recorded with each signature.
 - **Administration**: hash-chained system log, audit trail PDFs, print copies, company list, backup and restore.
 
 ## Run it (testing on this PC)
@@ -64,7 +67,7 @@ Both are windows onto the **same server and database**. Nothing about agreements
 ### Installable web app (no installer needed)
 
 1. Open the eSign address over **HTTPS** in Chrome or Edge (e.g. the ngrok or company address). Installing does not work over plain `http://` IP addresses.
-2. Click the **Install** icon (⊕) in the address bar, or menu ⋮ → *Apps* → *Install JRS eSign*.
+2. Click the **Install** icon (⊕) in the address bar, or menu ⋮ → *Apps* → *Install Method365*.
 3. It gets its own window, Start-menu and taskbar icon, desktop notifications, and an offline screen. Updates arrive automatically with the website.
 
 The service worker caches only the page design and the offline page, never agreements, PDFs or `/api/` data.

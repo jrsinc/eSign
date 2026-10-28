@@ -1,4 +1,4 @@
-// JRS eSign desktop app: a secure window onto the shared eSign server.
+// Method365 desktop app: a secure window onto the shared Method365 server.
 // Nothing is stored locally except this app's settings (the server address); every agreement, signature
 // and audit record stays in the server's database, the same one the web app uses.
 const { app, BrowserWindow, Menu, Tray, shell, ipcMain, session, dialog, nativeImage } = require('electron');
@@ -60,7 +60,7 @@ function createWindow() {
     height: 880,
     minWidth: 900,
     minHeight: 600,
-    title: 'JRS eSign',
+    title: 'Method365',
     icon,
     autoHideMenuBar: true,
     backgroundColor: '#f4f6fa',
@@ -68,7 +68,7 @@ function createWindow() {
     webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true, sandbox: true, nodeIntegration: false, spellcheck: true },
   });
 
-  // Links to other websites open in the normal browser; the app only shows the eSign server.
+  // Links to other websites open in the normal browser; the app only shows the Method365 server.
   win.webContents.on('will-navigate', (e, url) => {
     if (!isServerUrl(url) && !url.startsWith('file:')) {
       e.preventDefault();
@@ -92,7 +92,7 @@ function createWindow() {
     e.preventDefault();
     win.hide();
     if (!trayHintShown && tray) {
-      tray.displayBalloon({ iconType: 'info', title: 'JRS eSign is still running', content: 'It keeps notifying you about signatures. Right-click the tray icon to quit.' });
+      tray.displayBalloon({ iconType: 'info', title: 'Method365 is still running', content: 'It keeps notifying you about signatures. Right-click the tray icon to quit.' });
       trayHintShown = true;
     }
   });
@@ -102,7 +102,7 @@ function createWindow() {
 
 function openSettings() {
   const s = new BrowserWindow({
-    width: 560, height: 480, parent: win || undefined, modal: !!win, title: 'JRS eSign settings', icon, autoHideMenuBar: true, resizable: false,
+    width: 560, height: 480, parent: win || undefined, modal: !!win, title: 'Method365 settings', icon, autoHideMenuBar: true, resizable: false,
     webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true, sandbox: true },
   });
   s.loadFile(path.join(__dirname, 'settings.html'));
@@ -111,7 +111,7 @@ function openSettings() {
 function buildMenus() {
   const startAtLogin = app.getLoginItemSettings().openAtLogin;
   const common = [
-    { label: 'Open JRS eSign', click: showWindow },
+    { label: 'Open Method365', click: showWindow },
     { label: 'Verify a signed PDF', click: () => { showWindow(); loadServer('/verify.html'); } },
     { type: 'separator' },
     { label: 'Settings…', click: openSettings },
@@ -125,7 +125,7 @@ function buildMenus() {
     { label: 'View', submenu: [{ role: 'reload' }, { label: 'Back', accelerator: 'Alt+Left', click: () => win?.webContents.navigationHistory.goBack() }, { type: 'separator' }, { role: 'zoomIn' }, { role: 'zoomOut' }, { role: 'resetZoom' }, { type: 'separator' }, { role: 'togglefullscreen' }] },
     { label: 'Help', submenu: [
       { label: 'Download root certificate (for Adobe trust)', click: () => shell.openExternal(new URL('/ca.cer', settings.serverUrl).toString()) },
-      { label: 'About JRS eSign', click: () => dialog.showMessageBox(win, { type: 'info', title: 'About JRS eSign', icon, message: `JRS eSign ${app.getVersion()}`, detail: `Connected to ${settings.serverUrl}\n\nThis app is a window onto your company's eSign server. Agreements, signatures and audit trails are stored on the server, not on this PC.` }) },
+      { label: 'About Method365', click: () => dialog.showMessageBox(win, { type: 'info', title: 'About Method365', icon, message: `Method365 ${app.getVersion()}`, detail: `Connected to ${settings.serverUrl}\n\nThis app is a window onto your company's Method365 server. Agreements, signatures and audit trails are stored on the server, not on this PC.` }) },
     ] },
   ]));
 }
@@ -156,13 +156,13 @@ app.whenReady().then(() => {
     if (isServerUrl(details.url)) details.requestHeaders['ngrok-skip-browser-warning'] = '1';
     cb({ requestHeaders: details.requestHeaders });
   });
-  // The eSign site may show notifications and copy links; everything else (camera, location…) is refused.
+  // The Method365 site may show notifications and copy links; everything else (camera, location…) is refused.
   session.defaultSession.setPermissionRequestHandler((wc, permission, cb, details) => {
     cb(isServerUrl(details.requestingUrl || wc.getURL()) && ['notifications', 'clipboard-sanitized-write'].includes(permission));
   });
 
   tray = new Tray(nativeImage.createFromPath(path.join(__dirname, 'build', 'tray.png')));
-  tray.setToolTip('JRS eSign');
+  tray.setToolTip('Method365');
   tray.on('click', showWindow);
   buildMenus();
   if (!process.argv.includes('--hidden')) createWindow();

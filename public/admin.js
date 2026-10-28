@@ -16,8 +16,8 @@ async function boot() {
   try {
     me = await api('/api/me');
     if (nextUrl) return location.replace(nextUrl);
-    $('#company').textContent = `${me.company} eSign`;
-    document.title = `${me.company} eSign`;
+    $('#company').textContent = me.app;
+    document.title = `${me.app} – ${me.company}`;
     $('#nav').classList.remove('hidden');
     $('#logout').classList.remove('hidden');
     $('#adminMenu').classList.toggle('hidden', me.user.role !== 'admin');
@@ -52,7 +52,7 @@ async function showLogin(notice = '') {
   app.innerHTML = `
     <div class="center-box card">
       <h1>Sign in</h1>
-      <p class="muted">${esc(status.company)} eSign. Use your own email address and password.</p>
+      <p class="muted">${esc(status.app)} for ${esc(status.company)}. Use your own email address and password.</p>
       ${nextUrl ? '<p class="small identity">Sign in with the email the document was sent to. You\'ll go straight back to the document.</p>' : ''}
       ${notice ? `<p class="small" style="color:var(--warn)">${esc(notice)}</p>` : ''}
       <form id="loginForm">
@@ -64,6 +64,7 @@ async function showLogin(notice = '') {
         <button class="primary" style="width:100%">Continue</button>
       </form>
       <p class="small muted" style="margin-top:14px">Two-step sign-in: after your password, we email you a one-time code.<br>Forgot your password or locked out? Ask your administrator.</p>
+      <p class="small muted" style="margin:10px 0 0;text-align:center"><a href="/policy.html" target="_blank" rel="noopener">Policies and privacy</a></p>
     </div>`;
   if (nextUrl && params.get('email')) {
     $('#email').value = params.get('email');
@@ -131,7 +132,7 @@ function showSetup(status) {
   app.innerHTML = `
     <div class="center-box card" style="max-width:460px">
       <h1>Create the first administrator</h1>
-      <p class="muted">${esc(status.company)} eSign now uses personal accounts: each person signs in with their own email, password and an emailed code.</p>
+      <p class="muted">${esc(status.app)} uses personal accounts: each person signs in with their own email, password and an emailed code.</p>
       <form id="setupForm">
         <label for="sPw">Setup password (ADMIN_PASSWORD in the .env file)</label>
         <input id="sPw" type="password" required autofocus>
@@ -1495,7 +1496,7 @@ function showDetail(doc) {
           <p class="small muted" style="margin:10px 0 0">Transaction ID: ${esc(doc.transactionId || doc.id)}<br>Sent ${when(doc.sentAt)}${done ? `<br>Completed ${when(doc.completedAt)}` : ''}
           ${doc.status === 'voided' ? `<br>Cancelled ${when(doc.cancelledAt)}${doc.cancelReason ? `<br>Reason: ${esc(doc.cancelReason)}` : ''}` : ''}
           ${doc.status === 'sent' ? `<br>Reminders: ${REMINDER_LABELS[doc.reminder || 'none']}` : ''}</p>
-          ${done && doc.locked ? `<div class="locked">🔒 <strong>Locked.</strong> Certified by ${esc(me.company)} eSign: no changes allowed. Any edit breaks the signatures.</div>` : ''}
+          ${done && doc.locked ? `<div class="locked">🔒 <strong>Locked.</strong> Certified by ${esc(me.company)} ${esc(me.app)}: no changes allowed. Any edit breaks the signatures.</div>` : ''}
           ${done ? `<p class="small muted" style="word-break:break-all">Signed file SHA-256:<br>${doc.finalHash}</p>` : ''}
         </section>
         <section>

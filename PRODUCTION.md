@@ -1,4 +1,4 @@
-# Going live: JRS eSign in production
+# Going live: Method365 in production
 
 Today the app runs on one PC and reaches the internet through ngrok. That works for testing, but it
 stops whenever the PC sleeps, restarts or the session ends. For real agreements, run it on a server
