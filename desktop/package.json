@@ -2,7 +2,7 @@
   "name": "jrs-esign-desktop",
   "productName": "JRS eSign",
   "version": "1.0.0",
-  "description": "Desktop app for the JRS LLC e-signature system. It opens the shared eSign server in its own window; all data stays on the server.",
+  "description": "Desktop app for the JRS e-signature system. It opens the shared eSign server in its own window; all data stays on the server.",
   "main": "main.js",
   "private": true,
   "scripts": {

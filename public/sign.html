@@ -81,6 +81,22 @@
     </div>
   </div>
 
+  <!-- Fresh re-authentication when signing or declining -->
+  <div id="pwModal" class="modal-bg hidden">
+    <div class="modal" style="max-width:480px">
+      <h2 id="pwTitle">Confirm signing with your password</h2>
+      <table class="sign-summary" id="pwSummary"></table>
+      <label for="signPw" id="pwLabel">Password</label>
+      <input id="signPw" type="password" autocomplete="off">
+      <p id="pwErr" class="small" style="color:var(--danger);margin:6px 0 0"></p>
+      <p id="pwHelp" class="small muted" style="margin:6px 0 0"></p>
+      <div class="row end" style="margin-top:14px">
+        <button id="pwCancel">Cancel</button>
+        <button id="pwOk" class="primary">Sign</button>
+      </div>
+    </div>
+  </div>
+
   <script src="/vendor/pdfjs/pdf.min.js"></script>
   <script src="/formula.js"></script>
   <script src="/common.js"></script>

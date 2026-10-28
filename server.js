@@ -30,7 +30,7 @@ const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'admin';
 const COMPANY = mailer.COMPANY;
 const SENDER_EMAIL = process.env.NOTIFY_EMAIL || process.env.MAIL_FROM || '';
 // The app's own certificate authority for digital signatures (created on first run in data/pki).
-const CA = loadOrCreateCA(path.join(store.DATA_DIR, 'pki'), COMPANY);
+let CA = loadOrCreateCA(path.join(store.DATA_DIR, 'pki'), COMPANY);
 const AGREEMENT_PREFIX = String(process.env.AGREEMENT_PREFIX || 'AGR').replace(/[^A-Za-z0-9]/g, '').slice(0, 10) || 'AGR';
 if (!process.env.ADMIN_PASSWORD) console.warn('WARNING: ADMIN_PASSWORD not set, using "admin". Set it before real use.');
 
@@ -72,7 +72,7 @@ function log(doc, text, req, type = 'info', detail) {
   const entry = { at: now(), actor: req?.actor || 'System', text, ip: req ? clientIp(req) : undefined, type, ...(detail ? { detail } : {}) };
   doc.events.push(audit.seal(doc.events, entry));
 }
-const syslog = audit.systemLog(store.DATA_DIR);
+let syslog = audit.systemLog(store.DATA_DIR);
 const sysLog = (req, type, text, detail) => syslog.add({ actor: req?.actor || 'System', type, text, ip: req ? clientIp(req) : undefined, ...(detail ? { detail } : {}) });
 
 // Short device description for the audit trail, e.g. "Chrome 141 on Windows".
@@ -416,6 +416,147 @@ app.post('/api/users/:id/:action', requireUser, requireAdminRole, async (req, re
   res.json({ user: publicUser(user), ...(password ? { password } : {}) });
 });
 
+// ---------- Company list (administrators) ----------
+// Names offered in a dropdown when a signer enters their company; signers can still type another.
+const companyKey = (name) => name.toLowerCase().replace(/\s+/g, ' ');
+const companyNames = () => store.companies().map((c) => c.name).sort((a, b) => a.localeCompare(b));
+app.get('/api/companies', requireUser, (req, res) => res.json(store.companies().slice().sort((a, b) => a.name.localeCompare(b.name))));
+
+app.post('/api/companies', requireUser, requireAdminRole, (req, res) => {
+  const name = String(req.body.name || '').trim().replace(/\s+/g, ' ').slice(0, 120);
+  if (!name) return res.status(400).json({ error: 'Please enter the company name.' });
+  if (store.companies().some((c) => companyKey(c.name) === companyKey(name))) return res.status(400).json({ error: `"${name}" is already in the list.` });
+  const company = { id: id(8), name, createdAt: now(), createdBy: req.user.id };
+  store.companies().push(company);
+  store.save();
+  sysLog(req, 'settings', `Company added to the list: ${name}`);
+  res.json(company);
+});
+
+app.put('/api/companies/:id', requireUser, requireAdminRole, (req, res) => {
+  const company = store.companies().find((c) => c.id === req.params.id);
+  if (!company) return res.status(404).json({ error: 'Company not found' });
+  const name = String(req.body.name || '').trim().replace(/\s+/g, ' ').slice(0, 120);
+  if (!name) return res.status(400).json({ error: 'Please enter the company name.' });
+  if (store.companies().some((c) => c !== company && companyKey(c.name) === companyKey(name))) return res.status(400).json({ error: `"${name}" is already in the list.` });
+  if (name !== company.name) sysLog(req, 'settings', `Company updated in the list: "${company.name}" → "${name}"`);
+  company.name = name;
+  store.save();
+  res.json(company);
+});
+
+app.delete('/api/companies/:id', requireUser, requireAdminRole, (req, res) => {
+  const company = store.companies().find((c) => c.id === req.params.id);
+  if (!company) return res.status(404).json({ error: 'Company not found' });
+  store.companies().splice(store.companies().indexOf(company), 1);
+  store.save();
+  sysLog(req, 'settings', `Company deleted from the list: ${company.name}`, 'Agreements already signed keep the company name entered at the time.');
+  res.json({ ok: true });
+});
+
+// ---------- Backup and restore (administrators) ----------
+// A backup is one file holding everything in the data folder: agreements and their PDFs, users,
+// companies, signer profiles, the certificate authority keys and the system log. Sign-in sessions are
+// not included. Before a restore, the current data is saved as a restore point in the backups folder.
+const BACKUP_FORMAT = 'jrs-esign-backup';
+const BACKUP_DIR = process.env.BACKUP_DIR || path.join(path.dirname(store.DATA_DIR), 'backups');
+const SKIP_IN_BACKUP = new Set(['sessions.json']);
+const backupUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 1024 * 1024 * 1024 } });
+
+function dataFiles(dir = store.DATA_DIR, prefix = '') {
+  const out = {};
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const rel = prefix ? `${prefix}/${entry.name}` : entry.name;
+    if (entry.isDirectory()) Object.assign(out, dataFiles(path.join(dir, entry.name), rel));
+    else if (!SKIP_IN_BACKUP.has(rel) && !entry.name.endsWith('.tmp')) out[rel] = fs.readFileSync(path.join(dir, entry.name)).toString('base64');
+  }
+  return out;
+}
+const filesChecksum = (files) => sha256(JSON.stringify(Object.keys(files).sort().map((k) => [k, files[k]])));
+function makeBackup(createdBy) {
+  const files = dataFiles();
+  const body = { format: BACKUP_FORMAT, version: 1, company: COMPANY, createdAt: now(), createdBy, counts: backupCounts(JSON.parse(Buffer.from(files['db.json'] || 'e30=', 'base64'))), checksum: filesChecksum(files), files };
+  return require('zlib').gzipSync(JSON.stringify(body));
+}
+const backupCounts = (db) => ({ agreements: (db.documents || []).length, users: (db.users || []).length, companies: (db.companies || []).length });
+const backupName = (at = new Date()) => `${COMPANY.replace(/[^\w-]/g, '_')}-eSign-backup-${at.toISOString().slice(0, 19).replace(/[T:]/g, '-')}.esbackup`;
+
+// Reads and checks an uploaded backup; throws a readable error if it isn't a complete, unchanged backup.
+function readBackup(buf) {
+  let body;
+  try {
+    body = JSON.parse(require('zlib').gunzipSync(buf).toString('utf8'));
+  } catch {
+    throw Object.assign(new Error('This is not an eSign backup file.'), { status: 400 });
+  }
+  if (body?.format !== BACKUP_FORMAT || !body.files || typeof body.files !== 'object') throw Object.assign(new Error('This is not an eSign backup file.'), { status: 400 });
+  if (body.checksum !== filesChecksum(body.files)) throw Object.assign(new Error('This backup is damaged or was changed after it was made, so it can\'t be restored.'), { status: 400 });
+  for (const rel of Object.keys(body.files)) {
+    if (rel.includes('\\') || rel.split('/').some((p) => !p || p === '.' || p === '..') || path.isAbsolute(rel) || SKIP_IN_BACKUP.has(rel)) {
+      throw Object.assign(new Error('This backup contains an invalid file path.'), { status: 400 });
+    }
+  }
+  let db;
+  try {
+    db = JSON.parse(Buffer.from(body.files['db.json'] || '', 'base64').toString('utf8'));
+  } catch {
+    throw Object.assign(new Error('This backup has no readable agreement database.'), { status: 400 });
+  }
+  if (!Array.isArray(db.documents)) throw Object.assign(new Error('This backup has no readable agreement database.'), { status: 400 });
+  if (!(db.users || []).some((u) => u.role === 'admin' && u.status === 'active')) throw Object.assign(new Error('This backup has no active administrator, so no one could sign in after restoring it.'), { status: 400 });
+  return { body, db };
+}
+
+app.get('/api/backup', requireUser, requireAdminRole, (req, res) => {
+  const buf = makeBackup(actorOf(req.user));
+  const counts = backupCounts(JSON.parse(fs.readFileSync(path.join(store.DATA_DIR, 'db.json'), 'utf8')));
+  sysLog(req, 'backup', `Backup downloaded by ${req.user.name}`, `${counts.agreements} agreements, ${counts.users} users, ${counts.companies} companies - ${(buf.length / 1048576).toFixed(1)} MB`);
+  res.setHeader('Content-Type', 'application/octet-stream');
+  res.setHeader('Content-Disposition', `attachment; filename="${backupName()}"`);
+  res.send(buf);
+});
+
+// Check a backup before restoring it: what it contains and when it was made.
+app.post('/api/restore/check', requireUser, requireAdminRole, backupUpload.single('file'), (req, res) => {
+  if (!req.file) return res.status(400).json({ error: 'Please choose a backup file.' });
+  const { body, db } = readBackup(req.file.buffer);
+  res.json({ company: body.company, createdAt: body.createdAt, createdBy: body.createdBy, counts: backupCounts(db), files: Object.keys(body.files).length });
+});
+
+app.post('/api/restore', requireUser, requireAdminRole, backupUpload.single('file'), (req, res) => {
+  // Replacing all data needs the administrator's password again.
+  if (!authLib.verifyPassword(req.body.password || '', req.user.passwordHash)) return res.status(403).json({ error: 'Your password is not correct.' });
+  if (!req.file) return res.status(400).json({ error: 'Please choose a backup file.' });
+  const { body, db } = readBackup(req.file.buffer);
+
+  // Restore point: the data as it is now, in case this restore was a mistake.
+  fs.mkdirSync(BACKUP_DIR, { recursive: true });
+  const restorePoint = `restore-point-${backupName().replace(/\.esbackup$/, '')}.esbackup`;
+  fs.writeFileSync(path.join(BACKUP_DIR, restorePoint), makeBackup(`Automatic restore point before restore by ${actorOf(req.user)}`));
+
+  // Replace the data folder's contents (sign-in sessions aside) with the backup.
+  for (const entry of fs.readdirSync(store.DATA_DIR)) {
+    if (SKIP_IN_BACKUP.has(entry)) continue;
+    fs.rmSync(path.join(store.DATA_DIR, entry), { recursive: true, force: true });
+  }
+  for (const [rel, b64] of Object.entries(body.files)) {
+    const target = path.join(store.DATA_DIR, ...rel.split('/'));
+    if (!target.startsWith(store.DATA_DIR + path.sep)) continue;
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.writeFileSync(target, Buffer.from(b64, 'base64'));
+  }
+  store.reload();
+  CA = loadOrCreateCA(path.join(store.DATA_DIR, 'pki'), COMPANY);
+  syslog = audit.systemLog(store.DATA_DIR);
+  // Accounts may differ in the restored data, so everyone signs in again.
+  sessions.clear();
+  saveSessions();
+  challenges.clear();
+  const counts = backupCounts(db);
+  sysLog(req, 'backup', `Data restored from a backup by ${req.user.name}`, `Backup made ${body.createdAt} by ${body.createdBy}: ${counts.agreements} agreements, ${counts.users} users, ${counts.companies} companies. Previous data saved as ${restorePoint}. Everyone was signed out.`);
+  res.json({ ok: true, counts, restorePoint });
+});
+
 // Status emails to the sender, like DocuSign's "X has signed" notices.
 // Goes to the person who sent the agreement, plus NOTIFY_EMAIL (e.g. a shared QA mailbox) if set.
 async function notifySender(subject, text, attachments, doc) {
@@ -451,7 +592,8 @@ function adminView(doc, req) {
   return {
     ...rest,
     // A signer only has a link once it is their turn (see issueLinks).
-    signers: doc.signers.map(({ token, ...s }) => ({ ...s, link: token && doc.status === 'sent' ? signLink({ token }) : null })),
+    // The temporary signing password belongs to the recipient alone: the sender never receives it.
+    signers: doc.signers.map(({ token, tempPw, signFailed, ...s }) => ({ ...s, tempPasswordSent: !!tempPw, link: token && doc.status === 'sent' ? signLink({ token }) : null })),
     fields: doc.fields.map((f) => ({ ...f, value: f.type === 'signature' || f.type === 'initials' ? (f.value ? '[signed]' : null) : f.value })),
     comments: doc.comments || [],
     events: seeAudit ? doc.events : [],
@@ -962,9 +1104,114 @@ function signerCtx(req, res) {
   return found;
 }
 
+// ---------- Signer identity ----------
+// Only the invited recipient may sign: the signing email must equal the invited email (trimmed,
+// case-insensitive), whoever holds the link. This is checked on the server for every signing request;
+// the signing page's own checks are only for convenience.
+// Flow A: the recipient has an account here. They must be signed in as that account, and re-enter
+//   their own password to sign.
+// Flow B: no account. A one-time temporary password is emailed to the invited address only (never shown
+//   to the sender); it works for this agreement and recipient only, expires, and is void once used.
+const SIGN_LOCK_AFTER = 5; // wrong passwords at signing, then signing is locked
+const SIGN_LOCK_MINUTES = 30;
+const TEMP_PW_MINUTES = 60;
+const sameEmail = (a, b) => String(a || '').trim().toLowerCase() === String(b || '').trim().toLowerCase();
+
+// The account signed in on this browser, if any (same rules as requireUser, without failing the request).
+function sessionUser(req) {
+  const s = sessions.get(req.cookies?.sid);
+  const user = s && store.getUser(s.userId);
+  if (!s || !user || s.expires < Date.now() || Date.now() - (s.lastSeen || 0) > IDLE_MINUTES * 60000 || user.status !== 'active') return null;
+  return user;
+}
+
+function signerIdentity(req, signer) {
+  const account = store.getUserByEmail(String(signer.email).trim());
+  if (!account) return { flow: 'temp', ok: true };
+  if (account.status !== 'active') return { flow: 'account', ok: false, reason: 'inactive' };
+  const user = sessionUser(req);
+  if (!user) return { flow: 'account', ok: false, reason: 'login' };
+  if (!sameEmail(user.email, signer.email)) return { flow: 'account', ok: false, reason: 'mismatch', loggedInAs: user.email };
+  return { flow: 'account', ok: true, user };
+}
+
+// Refuses a request from someone who is not (signed in as) the invited recipient.
+function identityBlocked(req, res, doc, signer) {
+  const idn = signerIdentity(req, signer);
+  if (idn.ok) return idn;
+  const error = {
+    login: `This document was sent to ${signer.email}. Please sign in with that account to view and sign it.`,
+    mismatch: `You are logged in as ${idn.loggedInAs}, but this document was sent to ${signer.email}. Please log out and log in with ${signer.email}, or contact the sender.`,
+    inactive: `The account for ${signer.email} is deactivated, so this document can't be signed with it. Please contact the sender.`,
+  }[idn.reason];
+  if (idn.reason === 'mismatch' && doc.status === 'sent') {
+    log(doc, `Access refused: signing link for ${who(signer)} opened while signed in as ${idn.loggedInAs}`, req, 'failed');
+    store.save();
+  }
+  res.status(403).json({ error, identity: { reason: idn.reason, invitedEmail: signer.email, loggedInAs: idn.loggedInAs }, company: COMPANY, title: doc.title, agreementId: doc.agreementId });
+  return null;
+}
+
+const signLocked = (signer) => signer.signLockedUntil && Date.parse(signer.signLockedUntil) > Date.now();
+const tempPwValid = (signer) => !!signer.tempPw?.hash && signer.tempPw.expires > Date.now();
+
+async function sendTempPassword(doc, signer, req) {
+  const password = authLib.generatePassword();
+  signer.tempPw = { hash: authLib.hashPassword(password), expires: Date.now() + TEMP_PW_MINUTES * 60000, sentAt: Date.now() };
+  log(doc, `Temporary signing password emailed to ${signer.email}`, req, 'email_sent', `${auditStamp(now())} - Valid ${TEMP_PW_MINUTES} minutes, for this agreement and recipient only, one use`);
+  store.save();
+  await mailer.send({
+    to: signer.email,
+    subject: `Your temporary password to sign "${doc.title}"`,
+    heading: 'Your temporary signing password',
+    text: `Hello ${signer.name},\n\nUse this temporary password to sign "${doc.title}" from ${COMPANY}.`,
+    details: [['Agreement ID', doc.agreementId || '-'], ['Temporary password', password]],
+    after: `It works only for this document, only for ${signer.email}, and only once. It expires in ${TEMP_PW_MINUTES} minutes; you can ask for a new one on the signing page.\n\nIf you didn't open this document, ignore this email.`,
+    note: 'It contains a temporary password.',
+  });
+}
+
+// Checks the password typed at signing (or declining): the account password in flow A, the temporary
+// password in flow B. Wrong passwords count toward a lock; at the limit the sender is told.
+async function checkSigningPassword(req, doc, signer, idn) {
+  const password = String(req.body.password || '');
+  if (signLocked(signer)) {
+    return { status: 423, error: `Signing is locked after too many wrong passwords. Try again after ${new Date(signer.signLockedUntil).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })}, or contact the sender.` };
+  }
+  let good;
+  if (idn.flow === 'account') {
+    good = authLib.verifyPassword(password, idn.user.passwordHash);
+  } else {
+    if (!signer.tempPw?.hash) return { status: 400, error: 'Please ask for a temporary password first.', tempMissing: true };
+    good = authLib.verifyPassword(password, signer.tempPw.hash);
+    if (good && signer.tempPw.expires <= Date.now()) return { status: 400, error: 'Your temporary password has expired. Please send yourself a new one.', tempExpired: true };
+  }
+  if (good) {
+    signer.signFailed = 0;
+    return { ok: true };
+  }
+  signer.signFailed = (signer.signFailed || 0) + 1;
+  if (signer.signFailed >= SIGN_LOCK_AFTER) {
+    signer.signFailed = 0;
+    signer.signLockedUntil = new Date(Date.now() + SIGN_LOCK_MINUTES * 60000).toISOString();
+    log(doc, `Signing locked for ${who(signer)} for ${SIGN_LOCK_MINUTES} minutes after ${SIGN_LOCK_AFTER} wrong passwords`, req, 'failed');
+    store.save();
+    await notifySender(`Signing locked: ${signer.name} on "${doc.title}" [${doc.agreementId}]`,
+      `Signing agreement ${doc.agreementId} "${doc.title}" as ${who(signer)} was locked for ${SIGN_LOCK_MINUTES} minutes after ${SIGN_LOCK_AFTER} wrong passwords.\nIP address: ${clientIp(req)} - Device: ${deviceOf(req.headers['user-agent'])}\n\nIf this wasn't ${signer.name}, someone else may have their signing link.`, undefined, doc);
+    return { status: 423, error: `Password incorrect. Signing is now locked for ${SIGN_LOCK_MINUTES} minutes and the sender has been notified.` };
+  }
+  log(doc, `Wrong password at signing for ${who(signer)} (${signer.signFailed} of ${SIGN_LOCK_AFTER})`, req, 'failed');
+  store.save();
+  return { status: 401, error: 'Password incorrect. Please try again.', attemptsLeft: SIGN_LOCK_AFTER - signer.signFailed };
+}
+
+// GxP training: no training records are kept yet, so nobody is blocked. When training is added,
+// return false here for anyone whose required training is missing or expired.
+const trainingCurrent = () => true;
+
 // A signing link works only until its owner signs. After that it just says "already signed";
 // the signed copy reaches them as an email attachment instead.
-app.get('/api/sign/:token', (req, res) => {
+app.get('/api/sign/:token', async (req, res) => {
   const ctx = signerCtx(req, res);
   if (!ctx) return;
   const { doc, signer } = ctx;
@@ -972,18 +1219,34 @@ app.get('/api/sign/:token', (req, res) => {
     return res.json({
       company: COMPANY, title: doc.title, agreementId: doc.agreementId, status: doc.status, expired: true,
       signer: { name: signer.name, status: 'signed', signedAt: signer.signedAt },
+      // After signing without an account, the person may ask for one.
+      canRequestAccount: !store.getUserByEmail(signer.email) && !signer.accountRequestedAt,
     });
   }
+  const idn = identityBlocked(req, res, doc, signer);
+  if (!idn) return;
   const waitingOn = doc.status === 'sent' && !activeSigners(doc).includes(signer) && signer.status !== 'signed'
     ? activeSigners(doc).map((s) => s.name) : [];
+  const myTurn = doc.status === 'sent' && !waitingOn.length && signer.status !== 'declined';
   if (doc.status === 'sent' && signer.status === 'pending' && !waitingOn.length) {
     signer.status = 'viewed';
     signer.viewedAt = now();
     log(doc, `Document viewed by ${who(signer)}`, req, 'viewed');
     store.save();
   }
+  // Flow B: the temporary password is emailed automatically the first time the document is opened.
+  let tempError = '';
+  if (idn.flow === 'temp' && myTurn && !signer.tempPw && !signLocked(signer)) {
+    try {
+      await sendTempPassword(doc, signer, req);
+    } catch (e) {
+      console.error('Mail error:', e.message);
+      tempError = 'The temporary password could not be emailed. Please try "Send a new temporary password".';
+    }
+  }
   res.json({
     company: COMPANY,
+    companies: companyNames(),
     title: doc.title,
     agreementId: doc.agreementId,
     cancelReason: doc.cancelReason,
@@ -992,6 +1255,16 @@ app.get('/api/sign/:token', (req, res) => {
     requireReason: doc.requireReason !== false,
     reasons: REASONS,
     signer: { name: signer.name, email: signer.email, status: signer.status, color: signer.color },
+    auth: {
+      flow: idn.flow,
+      invitedEmail: signer.email,
+      signedInAs: idn.user?.email,
+      tempSent: idn.flow === 'temp' && !!signer.tempPw,
+      tempValid: idn.flow === 'temp' && tempPwValid(signer),
+      tempMinutes: TEMP_PW_MINUTES,
+      tempError,
+      lockedUntil: signLocked(signer) ? signer.signLockedUntil : null,
+    },
     waitingOn,
     fields: doc.fields
       .filter((f) => f.signerId === signer.id)
@@ -1014,8 +1287,50 @@ app.get('/api/sign/:token/file', (req, res) => {
   if (!ctx) return;
   const { doc, signer } = ctx;
   if (signer.status === 'signed') return res.status(410).json({ error: 'You have already signed. This link is no longer valid.' });
+  if (!identityBlocked(req, res, doc, signer)) return;
   if (doc.status !== 'sent' || !activeSigners(doc).includes(signer)) return res.status(403).json({ error: 'This document is not available.' });
   sendPdf(res, doc.originalFile, `${doc.title}.pdf`, true);
+});
+
+// Flow B: email a new temporary password (the previous one stops working).
+app.post('/api/sign/:token/temp-password', async (req, res) => {
+  const ctx = signerCtx(req, res);
+  if (!ctx) return;
+  const { doc, signer } = ctx;
+  const idn = identityBlocked(req, res, doc, signer);
+  if (!idn) return;
+  if (idn.flow !== 'temp') return res.status(400).json({ error: 'Sign with your account password.' });
+  if (doc.status !== 'sent' || signer.status === 'signed' || signer.status === 'declined' || !activeSigners(doc).includes(signer)) return res.status(400).json({ error: 'This document can\'t be signed now.' });
+  if (signLocked(signer)) return res.status(423).json({ error: 'Signing is locked after too many wrong passwords. Please try again later.' });
+  if (signer.tempPw && Date.now() - signer.tempPw.sentAt < 60000) return res.status(429).json({ error: 'Please wait a minute before asking for another temporary password.' });
+  try {
+    await sendTempPassword(doc, signer, req);
+  } catch (e) {
+    console.error('Mail error:', e.message);
+    return res.status(503).json({ error: 'The temporary password could not be emailed. Please try again shortly.' });
+  }
+  res.json({ ok: true, sentTo: signer.email, minutes: TEMP_PW_MINUTES });
+});
+
+// After signing without an account: ask the administrators for one (only they create accounts).
+app.post('/api/sign/:token/request-account', async (req, res) => {
+  const ctx = signerCtx(req, res);
+  if (!ctx) return;
+  const { doc, signer } = ctx;
+  if (signer.status !== 'signed') return res.status(400).json({ error: 'You can ask for an account after signing.' });
+  if (store.getUserByEmail(signer.email)) return res.status(400).json({ error: 'An account with this email already exists.' });
+  if (signer.accountRequestedAt) return res.json({ ok: true, already: true });
+  signer.accountRequestedAt = now();
+  store.save();
+  sysLog(req, 'user', `Account requested by ${who(signer)} after signing ${doc.agreementId}`);
+  for (const admin of store.users().filter((u) => u.role === 'admin' && u.status === 'active')) {
+    await mailer.send({
+      to: admin.email, subject: `Account request: ${signer.name}`, heading: 'Account request',
+      text: `${who(signer)} signed agreement ${doc.agreementId} "${doc.title}" and asked for an account for future documents.\n\nTo give them one, add them on the Users page. If you don't, they can still sign future documents with a temporary password.`,
+      link: BASE_URL, linkLabel: 'OPEN ESIGN',
+    }).catch((e) => console.error('Mail error:', e.message));
+  }
+  res.json({ ok: true });
 });
 
 // Issues each signer's certificate (logged first, so the audit report lists it), then builds the
@@ -1147,6 +1462,7 @@ app.post('/api/sign/:token/attachment/:fieldId', attachmentUpload.single('file')
   const ctx = signerCtx(req, res);
   if (!ctx) return;
   const { doc, signer } = ctx;
+  if (!identityBlocked(req, res, doc, signer)) return;
   const field = doc.fields.find((f) => f.id === req.params.fieldId && f.signerId === signer.id && f.type === 'attachment');
   if (!field || doc.status !== 'sent' || signer.status === 'signed' || !activeSigners(doc).includes(signer)) return res.status(400).json({ error: 'You cannot attach a file now.' });
   if (!req.file) return res.status(400).json({ error: 'Choose a file.' });
@@ -1168,9 +1484,14 @@ app.post('/api/sign/:token', async (req, res) => {
   const ctx = signerCtx(req, res);
   if (!ctx) return;
   const { doc, signer } = ctx;
+  // Checked in this order; the signature is applied only if every check passes.
+  // 1. The agreement is still waiting for this signer.
   if (doc.status !== 'sent') return res.status(400).json({ error: `This document is ${doc.status}.` });
   if (signer.status === 'signed' || signer.status === 'declined') return res.status(400).json({ error: `You have already ${signer.status}.` });
   if (!activeSigners(doc).includes(signer)) return res.status(400).json({ error: 'It is not your turn to sign yet.' });
+  // 2. The person signing is the invited recipient.
+  const idn = identityBlocked(req, res, doc, signer);
+  if (!idn) return;
   if (req.body.consent !== true) return res.status(400).json({ error: 'You must agree to sign electronically.' });
   const reason = String(req.body.reason || '').trim().slice(0, 300);
   if (doc.requireReason !== false && !reason) return res.status(400).json({ error: 'Please give a reason for signing.' });
@@ -1179,6 +1500,32 @@ app.post('/api/sign/:token', async (req, res) => {
   const tz = validTz(String(req.body.tz || 'UTC'));
   const { values, error } = stageValues(doc, signer, req.body.values || {}, signedAt, tz);
   if (error) return res.status(400).json({ error });
+
+  // 3. Fresh re-authentication: the account password (flow A) or the temporary password (flow B).
+  const pw = await checkSigningPassword(req, doc, signer, idn);
+  if (!pw.ok) return res.status(pw.status).json(pw);
+  // 4. Required training is current (GxP).
+  if (!trainingCurrent(idn.user || signer)) return res.status(403).json({ error: 'Your required training is not current, so you can\'t sign yet. Please contact the sender.' });
+  // 5. Segregation of duties: one person signs an agreement only once, even if listed twice.
+  if (doc.signers.some((s) => s !== signer && s.status === 'signed' && sameEmail(s.email, signer.email))) {
+    log(doc, `Signature refused for ${who(signer)}: this person already signed this agreement as another recipient`, req, 'failed');
+    store.save();
+    return res.status(403).json({ error: 'You have already signed this agreement as another recipient. One person can sign an agreement only once.' });
+  }
+  // 6. The document is the version that was sent.
+  if (!fs.existsSync(filePath(doc.originalFile)) || sha256(fs.readFileSync(filePath(doc.originalFile))) !== doc.originalHash) {
+    log(doc, `Signature refused for ${who(signer)}: the document no longer matches the version that was sent`, req, 'failed');
+    store.save();
+    return res.status(409).json({ error: 'This document has changed since it was sent, so it can\'t be signed. Please contact the sender.' });
+  }
+  // The temporary password is spent the moment it is used.
+  if (idn.flow === 'temp') {
+    delete signer.tempPw;
+    signer.tempPwUsedAt = signedAt.toISOString();
+  }
+  const authText = idn.flow === 'account'
+    ? `signed in as ${idn.user.email} (password + emailed code), password re-entered at signing`
+    : `one-time temporary password emailed to ${signer.email}, entered at signing`;
 
   // Reject images pdf-lib can't embed now, rather than failing at finalization.
   try {
@@ -1203,6 +1550,7 @@ app.post('/api/sign/:token', async (req, res) => {
     title, company: companyName,
     status: 'signed', signedAt: signedAt.toISOString(), consentAt: signedAt.toISOString(), tz, reason, appearance,
     ip: clientIp(req), userAgent: String(req.headers['user-agent'] || '').slice(0, 300),
+    authMethod: idn.flow === 'account' ? 'account-password' : 'temporary-password',
   });
   const sigValue = (type) => doc.fields.find((f) => f.signerId === signer.id && f.type === type && f.value)?.value;
   store.saveProfile(signer.email, {
@@ -1211,7 +1559,7 @@ app.post('/api/sign/:token', async (req, res) => {
     ...(sigValue('signature') ? { signature: sigValue('signature') } : {}), ...(sigValue('initials') ? { initials: sigValue('initials') } : {}),
   });
   log(doc, `Document e-signed by ${who(signer)}`, req, 'signed',
-    `Signature Date: ${auditStamp(signer.signedAt)} - Time Source: server- IP address: ${signer.ip} - Device: ${deviceOf(signer.userAgent)} - Authentication: personal one-time email link - Signature Appearance Selected: ${appearance}${reason ? ` - Reason: ${reason}` : ''}`);
+    `Signature Date: ${auditStamp(signer.signedAt)} - Time Source: server- IP address: ${signer.ip} - Device: ${deviceOf(signer.userAgent)} - Identity: signer email matches invited email - Authentication: ${authText} - Signature Appearance Selected: ${appearance}${reason ? ` - Reason: ${reason}` : ''}`);
 
   if (doc.signers.every((s) => s.status === 'signed')) {
     doc.completedAt = now();
@@ -1236,7 +1584,11 @@ app.post('/api/sign/:token', async (req, res) => {
     for (const s of issueLinks(doc)) await invite(doc, s);
   }
   store.save();
-  res.json({ ok: true, completed: doc.status === 'completed' });
+  res.json({
+    ok: true, completed: doc.status === 'completed',
+    confirmation: { name: signer.name, email: signer.email, signedAt: signer.signedAt, reason, agreementId: doc.agreementId, title: doc.title },
+    canRequestAccount: idn.flow === 'temp' && !store.getUserByEmail(signer.email),
+  });
 });
 
 app.post('/api/sign/:token/decline', async (req, res) => {
@@ -1244,6 +1596,13 @@ app.post('/api/sign/:token/decline', async (req, res) => {
   if (!ctx) return;
   const { doc, signer } = ctx;
   if (doc.status !== 'sent' || signer.status === 'signed') return res.status(400).json({ error: 'Cannot decline now.' });
+  // Declining cancels the agreement, so it needs the same identity and password as signing.
+  const idn = identityBlocked(req, res, doc, signer);
+  if (!idn) return;
+  if (!activeSigners(doc).includes(signer)) return res.status(400).json({ error: 'It is not your turn yet.' });
+  const pw = await checkSigningPassword(req, doc, signer, idn);
+  if (!pw.ok) return res.status(pw.status).json(pw);
+  if (idn.flow === 'temp') delete signer.tempPw;
   signer.status = 'declined';
   doc.status = 'declined';
   const reason = req.body.reason ? String(req.body.reason).slice(0, 300) : '';

@@ -6,16 +6,21 @@ let me = null;
 const rid = () => Math.random().toString(36).slice(2, 10);
 const REMINDER_LABELS = { none: 'Never', daily: 'Every day', every2days: 'Every 2 days', weekly: 'Every week' };
 
+// Coming from a signing link that needs an account: after sign-in, go straight back to it.
+// Only this site's signing page is accepted, so the link can't send anyone elsewhere.
+const params = new URLSearchParams(location.search);
+const nextUrl = /^\/sign\.html\?t=[\w-]+$/.test(params.get('next') || '') ? params.get('next') : null;
+
 let watcher = null;
 async function boot() {
   try {
     me = await api('/api/me');
+    if (nextUrl) return location.replace(nextUrl);
     $('#company').textContent = `${me.company} eSign`;
     document.title = `${me.company} eSign`;
     $('#nav').classList.remove('hidden');
     $('#logout').classList.remove('hidden');
-    $('#usersLink').classList.toggle('hidden', me.user.role !== 'admin');
-    $('#logLink').classList.toggle('hidden', me.user.role !== 'admin');
+    $('#adminMenu').classList.toggle('hidden', me.user.role !== 'admin');
     $('#account').classList.remove('hidden');
     $('#account').textContent = `👤 ${me.user.name}`;
     $('#account').title = `${me.user.email} · ${me.user.role === 'admin' ? 'Administrator · click to change your password' : 'Sender'}`;
@@ -29,29 +34,6 @@ async function boot() {
     else app.innerHTML = `<div class="wrap card">${esc(e.message)}</div>`;
   }
 }
-
-// Every password box gets a Show / Hide button, wherever it appears (sign-in, setup, change password).
-function addPasswordToggle(input) {
-  if (input.closest('.pw-wrap')) return;
-  const wrap = document.createElement('span');
-  wrap.className = 'pw-wrap';
-  input.replaceWith(wrap);
-  const btn = document.createElement('button');
-  btn.type = 'button';
-  btn.className = 'pw-toggle';
-  btn.textContent = 'Show';
-  btn.setAttribute('aria-label', 'Show password');
-  btn.onclick = () => {
-    const show = input.type === 'password';
-    input.type = show ? 'text' : 'password';
-    btn.textContent = show ? 'Hide' : 'Show';
-    btn.setAttribute('aria-label', show ? 'Hide password' : 'Show password');
-    input.focus();
-  };
-  wrap.append(input, btn);
-}
-new MutationObserver(() => document.querySelectorAll('input[type=password]').forEach(addPasswordToggle))
-  .observe(document.body, { childList: true, subtree: true });
 
 // Any request that finds the session gone (signed out after inactivity, disabled, …) returns to sign-in.
 window.onUnauthorized = (message) => {
@@ -71,6 +53,7 @@ async function showLogin(notice = '') {
     <div class="center-box card">
       <h1>Sign in</h1>
       <p class="muted">${esc(status.company)} eSign. Use your own email address and password.</p>
+      ${nextUrl ? '<p class="small identity">Sign in with the email the document was sent to. You\'ll go straight back to the document.</p>' : ''}
       ${notice ? `<p class="small" style="color:var(--warn)">${esc(notice)}</p>` : ''}
       <form id="loginForm">
         <label for="email">Email</label>
@@ -82,9 +65,13 @@ async function showLogin(notice = '') {
       </form>
       <p class="small muted" style="margin-top:14px">Two-step sign-in: after your password, we email you a one-time code.<br>Forgot your password or locked out? Ask your administrator.</p>
     </div>`;
+  if (nextUrl && params.get('email')) {
+    $('#email').value = params.get('email');
+    $('#pw').focus();
+  }
   $('#loginForm').onsubmit = async (e) => {
     e.preventDefault();
-    const btn = $('#loginForm button');
+    const btn = $('#loginForm button.primary');
     btn.disabled = true;
     try {
       const r = await api('/api/login', { method: 'POST', body: { email: $('#email').value, password: $('#pw').value } });
@@ -104,7 +91,7 @@ function showCodeStep({ challenge, sentTo, minutes }) {
       <form id="codeForm">
         <label for="code">Code</label>
         <input id="code" inputmode="numeric" autocomplete="one-time-code" maxlength="7" required autofocus
-          style="font-size:24px;letter-spacing:8px;text-align:center;font-family:Consolas,monospace" placeholder="000000">
+          style="font-size:24px;letter-spacing:8px;text-align:center;font-family:var(--font)" placeholder="000000">
         <p id="codeErr" class="small" style="color:var(--danger)"></p>
         <button class="primary" style="width:100%">Verify and sign in</button>
       </form>
@@ -203,6 +190,11 @@ $('#account').onclick = () => {
 };
 
 window.addEventListener('hashchange', () => me && route());
+// The Admin menu closes after choosing a page or clicking elsewhere.
+document.addEventListener('click', (e) => {
+  const menu = $('#adminMenu');
+  if (menu?.open && (!menu.contains(e.target) || e.target.closest('.menu-list a'))) menu.open = false;
+});
 
 function route() {
   const m = location.hash.match(/^#\/doc\/([\w-]+)/);
@@ -211,7 +203,129 @@ function route() {
   if (m) openDoc(m[1]);
   else if (location.hash === '#/system-log' && me.user.role === 'admin') showSystemLog();
   else if (location.hash === '#/users' && me.user.role === 'admin') showUsers();
+  else if (location.hash === '#/companies' && me.user.role === 'admin') showCompanies();
+  else if (location.hash === '#/backup' && me.user.role === 'admin') showBackup();
   else showList();
+}
+
+// ---------------- Company list (administrators) ----------------
+// Signers pick their company from this list, or choose "Other" and type it.
+async function showCompanies() {
+  const list = await api('/api/companies');
+  app.innerHTML = `
+    <div class="wrap" style="max-width:760px">
+      <div class="card" style="margin-bottom:16px">
+        <h1>Companies</h1>
+        <p class="muted small">When a signer fills in their company (a Company field, or the details asked before signing), they choose from this list. If theirs isn't listed, they pick <strong>Other</strong> and type it. With an empty list, signers simply type their company.</p>
+        <form id="addCompany" class="row" style="align-items:flex-end">
+          <div style="flex:1"><label for="coName">Company name</label><input id="coName" maxlength="120" required placeholder="e.g. Jupiter Research Services Inc"></div>
+          <button class="primary">Add company</button>
+        </form>
+      </div>
+      <div class="card" style="padding:0">
+        <table>
+          <thead><tr><th>Company</th><th>Added</th><th></th></tr></thead>
+          <tbody>${list.length ? list.map((c) => `
+            <tr data-id="${c.id}">
+              <td><strong>${esc(c.name)}</strong></td>
+              <td class="small muted">${when(c.createdAt)}</td>
+              <td class="small" style="white-space:nowrap;text-align:right">
+                <button class="ghost small" data-act="rename">Edit</button>
+                <button class="ghost small danger" data-act="remove">Delete</button>
+              </td>
+            </tr>`).join('') : '<tr><td colspan="3" class="muted" style="text-align:center;padding:24px">No companies yet. Signers will type their company name.</td></tr>'}</tbody>
+        </table>
+      </div>
+    </div>`;
+  $('#coName').focus();
+  $('#addCompany').onsubmit = async (e) => {
+    e.preventDefault();
+    try {
+      const c = await api('/api/companies', { method: 'POST', body: { name: $('#coName').value } });
+      await showCompanies();
+      toast(`${c.name} added`);
+    } catch (err) { toast(err.message, 4000); }
+  };
+  app.querySelectorAll('tr[data-id]').forEach((tr) => {
+    const c = list.find((x) => x.id === tr.dataset.id);
+    tr.querySelector('[data-act=rename]').onclick = async () => {
+      const name = prompt('Company name:', c.name);
+      if (name === null || name.trim() === c.name) return;
+      try {
+        await api(`/api/companies/${c.id}`, { method: 'PUT', body: { name } });
+        await showCompanies();
+        toast('Company updated');
+      } catch (err) { toast(err.message, 4000); }
+    };
+    tr.querySelector('[data-act=remove]').onclick = async () => {
+      if (!confirm(`Delete "${c.name}" from the list?\n\nAgreements already signed keep the company name entered at the time.`)) return;
+      try {
+        await api(`/api/companies/${c.id}`, { method: 'DELETE' });
+        await showCompanies();
+        toast('Company deleted');
+      } catch (err) { toast(err.message, 4000); }
+    };
+  });
+}
+
+// ---------------- Backup and restore (administrators) ----------------
+async function showBackup() {
+  app.innerHTML = `
+    <div class="wrap" style="max-width:760px">
+      <div class="card" style="margin-bottom:16px">
+        <h1>Backup</h1>
+        <p class="muted small">One file with everything: agreements and their PDFs, users, companies, saved signer details, the certificate keys for digital signatures, and the system log. Keep backups somewhere safe and private: they contain confidential documents and the keys that sign them.</p>
+        <a class="btn primary" href="/api/backup" id="dlBackup">⬇ Download backup</a>
+      </div>
+      <div class="card">
+        <h2>Restore from a backup</h2>
+        <p class="muted small">Replaces <strong>all</strong> current data with the backup. Before restoring, the current data is saved automatically as a restore point in the <code>backups</code> folder on the server. Everyone is signed out afterwards and signs in with the accounts in the backup.</p>
+        <label for="rsFile">Backup file (.esbackup)</label>
+        <input id="rsFile" type="file" accept=".esbackup">
+        <div id="rsInfo"></div>
+      </div>
+    </div>`;
+  $('#dlBackup').onclick = () => setTimeout(() => toast('Backup downloading'), 300);
+  $('#rsFile').onchange = async () => {
+    const file = $('#rsFile').files[0];
+    $('#rsInfo').innerHTML = '';
+    if (!file) return;
+    const fd = new FormData();
+    fd.append('file', file);
+    let info;
+    try {
+      info = await api('/api/restore/check', { method: 'POST', body: fd });
+    } catch (err) {
+      $('#rsInfo').innerHTML = `<p class="small" style="color:var(--danger)">${esc(err.message)}</p>`;
+      return;
+    }
+    $('#rsInfo').innerHTML = `
+      <div class="card" style="margin-top:12px;border-color:#fde68a;background:#fffbeb">
+        <strong>Backup of ${esc(info.company)}</strong>
+        <p class="small" style="margin:6px 0">Made ${when(info.createdAt)} by ${esc(info.createdBy)}<br>
+        ${info.counts.agreements} agreements · ${info.counts.users} users · ${info.counts.companies} companies</p>
+        <label for="rsPw">Your password, to confirm</label>
+        <input id="rsPw" type="password" autocomplete="current-password">
+        <div class="row end" style="margin-top:10px"><button class="primary danger" id="rsGo">Replace all data with this backup</button></div>
+      </div>`;
+    $('#rsGo').onclick = async () => {
+      if (!$('#rsPw').value) return toast('Please enter your password');
+      if (!confirm('Replace ALL current data with this backup?\n\nThe current data is saved as a restore point first. Everyone will be signed out.')) return;
+      const body = new FormData();
+      body.append('file', file);
+      body.append('password', $('#rsPw').value);
+      $('#rsGo').disabled = true;
+      try {
+        const r = await api('/api/restore', { method: 'POST', body });
+        alert(`Restore complete: ${r.counts.agreements} agreements, ${r.counts.users} users, ${r.counts.companies} companies.\n\nThe previous data was saved as ${r.restorePoint}.\n\nPlease sign in again.`);
+        location.hash = '';
+        location.reload();
+      } catch (err) {
+        $('#rsGo').disabled = false;
+        toast(err.message, 5000);
+      }
+    };
+  };
 }
 
 // ---------------- Users (administrators) ----------------
@@ -230,12 +344,12 @@ async function showUsers(notice = '') {
     <div class="wrap" style="max-width:1200px">
       <div class="card" style="margin-bottom:16px">
         <h1>Users</h1>
-        <p class="muted small">Only administrators add users and set passwords. When you add someone, we email them their sign-in ID (their email) and password. They sign in with both, plus a code emailed to them each time. Users can't change their own password; they ask you. Users are never deleted, only deactivated, so the audit trail always shows who did what.</p>
+        <p class="muted small">Only administrators add users and set passwords. When you add someone, we email them their sign-in ID (their email) and password. They sign in with both, plus a code emailed to them each time. Users can't change their own password; they ask you. Users are never deleted, only deactivated, so the audit trail always shows who did what. To give someone every administrator right, set their access to <strong>Administrator (full access)</strong>.</p>
         <form id="addUser">
           <div class="row" style="flex-wrap:wrap;align-items:flex-end">
             <div style="flex:1;min-width:160px"><label for="uName">Full name</label><input id="uName" required></div>
             <div style="flex:1;min-width:200px"><label for="uEmail">Email (sign-in ID)</label><input id="uEmail" type="email" required></div>
-            <div><label for="uRole">Role</label><select id="uRole"><option value="sender">Sender</option><option value="admin">Administrator</option></select></div>
+            <div><label for="uRole">Access</label><select id="uRole"><option value="sender">Sender</option><option value="admin">Administrator (full access)</option></select></div>
           </div>
           <div class="row" style="flex-wrap:wrap;align-items:flex-end;margin-top:4px">
             <div style="flex:1;min-width:220px"><label for="uPw">Password</label><input id="uPw" type="text" autocomplete="off" spellcheck="false" placeholder="Type one, or click Generate"></div>
@@ -249,12 +363,12 @@ async function showUsers(notice = '') {
       </div>
       <div class="card" style="padding:0;overflow-x:auto">
         <table>
-          <thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Status</th><th>Audit trail access</th><th>Last sign-in</th><th></th></tr></thead>
+          <thead><tr><th>Name</th><th>Email</th><th>Access</th><th>Status</th><th>Audit trail access</th><th>Last sign-in</th><th></th></tr></thead>
           <tbody>${users.map((u) => `
             <tr data-id="${u.id}">
               <td><strong>${esc(u.name)}</strong>${u.id === me.user.id ? ' <span class="small muted">(you)</span>' : ''}</td>
               <td class="small">${esc(u.email)}</td>
-              <td><select data-role ${u.id === me.user.id ? 'disabled' : ''}><option value="sender" ${u.role === 'sender' ? 'selected' : ''}>Sender</option><option value="admin" ${u.role === 'admin' ? 'selected' : ''}>Administrator</option></select></td>
+              <td><select data-role ${u.id === me.user.id ? 'disabled' : ''}><option value="sender" ${u.role === 'sender' ? 'selected' : ''}>Sender</option><option value="admin" ${u.role === 'admin' ? 'selected' : ''}>Administrator (full access)</option></select></td>
               <td>${statusBadge(u)}</td>
               <td class="small">${permBox(u, 'viewAudit', 'View')}${permBox(u, 'downloadAudit', 'Download')}</td>
               <td class="small muted">${u.lastLoginAt ? when(u.lastLoginAt) : '—'}</td>
@@ -273,7 +387,7 @@ async function showUsers(notice = '') {
   const showPassword = (user, password, emailed) => `
     <div class="card" style="margin-top:14px;border-color:#fde68a;background:#fffbeb">
       <strong>Password for ${esc(user.name)} (${esc(user.email)})</strong>
-      <div class="linkbox"><input readonly value="${esc(password)}" style="font-family:Consolas,monospace;font-size:15px"><button data-copy-pw>Copy</button></div>
+      <div class="linkbox"><input readonly value="${esc(password)}" style="font-family:var(--font);font-size:15px"><button data-copy-pw>Copy</button></div>
       <p class="small muted" style="margin:6px 0 0">${emailed ? `We've emailed the sign-in ID and this password to ${esc(user.email)}. ` : 'Give it to the person privately. '}Shown only now: it is stored scrambled and can't be displayed again. If it's lost, set a new one.</p>
     </div>`;
   const bindCopy = (password) => $('[data-copy-pw]')?.addEventListener('click', () => navigator.clipboard.writeText(password).then(() => toast('Password copied')));
@@ -298,6 +412,7 @@ async function showUsers(notice = '') {
     const uid = tr.dataset.id;
     const u = users.find((x) => x.id === uid);
     tr.querySelector('[data-role]').onchange = async (e) => {
+      if (e.target.value === 'admin' && !confirm(`Give ${u.name} full administrator access?\n\nThey will be able to add and edit users, set passwords, grant access, see and download all audit trails and the system log, manage the company list, and download or restore backups.`)) return showUsers();
       try {
         await api(`/api/users/${uid}/role`, { method: 'POST', body: { role: e.target.value } });
         toast('Role changed');
@@ -469,7 +584,7 @@ async function showList() {
   $('#rows').innerHTML = docs.length
     ? docs.map((d) => `
       <tr class="click" data-id="${d.id}">
-        <td class="small" style="font-family:Consolas,monospace;white-space:nowrap">${d.agreementId ? esc(d.agreementId) : '<span class="muted">Draft</span>'}</td>
+        <td class="small" style="font-family:var(--font);white-space:nowrap">${d.agreementId ? esc(d.agreementId) : '<span class="muted">Draft</span>'}</td>
         <td><strong>${esc(d.title)}</strong></td>
         <td><span class="badge ${d.status}">${statusLabel(d.status)}</span></td>
         <td class="small">${d.signers.map((s, i) => `${i + 1}. ${esc(s.name)} <span class="badge ${s.status}">${s.status}</span>`).join('<br>') || '<span class="muted">—</span>'}</td>
@@ -515,6 +630,17 @@ function newField(type, signerId, page, x, y, w, h, extra = {}) {
     ...extra,
   };
 }
+
+// The last copied field, kept for this browser tab so it can be pasted into another agreement too.
+const fieldClipboard = {
+  get() {
+    try { return JSON.parse(sessionStorage.getItem('esign-field-clipboard') || 'null') || this.mem || null; } catch { return this.mem || null; }
+  },
+  set(f) {
+    this.mem = structuredClone(f);
+    try { sessionStorage.setItem('esign-field-clipboard', JSON.stringify(f)); } catch {}
+  },
+};
 
 function showEditor(doc) {
   let activeSigner = doc.signers[0]?.id || null;
@@ -792,7 +918,7 @@ function showEditor(doc) {
         <p class="small muted">Digital ID stamp: the name large on the left; "Digitally signed by", DN, reason and date on the right.</p>` : ''}
       ${f.type === 'formula' ? `
         <label for="cfFormula">Formula</label>
-        <input id="cfFormula" value="${esc(f.formula)}" placeholder="{Qty} * {Price}" style="font-family:Consolas,monospace">
+        <input id="cfFormula" value="${esc(f.formula)}" placeholder="{Qty} * {Price}" style="font-family:var(--font)">
         <div id="cfFormulaMsg" class="small"></div>
         <p class="small muted">Use field names in braces with + - * / and ( ). Calculated automatically; the signer can't change it.
           ${(() => { const names = [...new Set(doc.fields.filter((x) => ['number', 'formula'].includes(x.type) && x.label && x.id !== f.id).map((x) => x.label))]; return names.length ? `<br>Number fields: ${names.map((n) => `<code>{${esc(n)}}</code>`).join(' ')}` : '<br>Give your Number fields a name first, e.g. Qty.'; })()}</p>
@@ -824,7 +950,8 @@ function showEditor(doc) {
           </div>` : `<div class="row"><span class="small">Mark color</span><input id="cfColor" type="color" value="${st.color}" style="width:44px;padding:2px"></div>`}` : ''}
       <h3 style="margin-top:16px">Advanced field actions</h3>
       <div class="actions-list">
-        <button class="ghost" id="cfCopy">⧉ Copy field</button>
+        <button class="ghost" id="cfClip" title="Ctrl+C, then Ctrl+V on any page or agreement">📋 Copy (Ctrl+C)</button>
+        <button class="ghost" id="cfCopy">⧉ Duplicate field</button>
         <button class="ghost" id="cfAll">⎘ Copy field to all pages</button>
         <button class="ghost danger" id="cfDel">🗑 Delete field</button>
       </div>`;
@@ -862,6 +989,7 @@ function showEditor(doc) {
     if ($('#cfSize')) { $('#cfSize').value = String(st.size); $('#cfSize').onchange = (e) => { st.size = e.target.value === 'auto' ? 'auto' : Number(e.target.value); changed(); }; }
     if ($('#cfColor')) $('#cfColor').oninput = (e) => { st.color = e.target.value; changed(); };
     $('#sidebar').querySelectorAll('[data-align]').forEach((b) => (b.onclick = () => { st.align = b.dataset.align; changed(); renderCustomize(f); }));
+    $('#cfClip').onclick = () => copyToClipboard(f);
     $('#cfCopy').onclick = () => copyField(f);
     $('#cfAll').onclick = () => copyToAllPages(f);
     $('#cfDel').onclick = () => deleteField(f);
@@ -876,6 +1004,52 @@ function showEditor(doc) {
     renderSidebar();
     scheduleSave();
     toast('Field copied');
+  }
+  // Copy / paste: the copied field stays available in this browser tab, so it can be pasted on another
+  // page or into another agreement. Pasted fields keep their size, label and style.
+  function copyToClipboard(f) {
+    fieldClipboard.set(f);
+    toast('Field copied. Click a page and press Ctrl+V to paste it.', 3000);
+  }
+  function pasteField(page, at) {
+    const src = fieldClipboard.get();
+    if (!src) return toast('Copy a field first (select it and press Ctrl+C)');
+    if (!doc.signers.length) return toast('Add a recipient first');
+    const p = pages[page];
+    if (!p) return;
+    const c = { ...structuredClone(src), id: rid(), page };
+    // Keep the recipient when they're on this agreement; otherwise give it to the selected recipient.
+    if (!doc.signers.some((s) => s.id === c.signerId)) c.signerId = activeSigner || doc.signers[0].id;
+    c.w = Math.min(c.w, 1);
+    c.h = Math.min(c.h, 1);
+    if (at) {
+      c.x = at.x - c.w / 2;
+      c.y = at.y - c.h / 2;
+    } else {
+      // Same spot as the original; step down a little if a field is already there.
+      while (doc.fields.some((o) => o.page === page && Math.abs(o.x - c.x) < 0.005 && Math.abs(o.y - c.y) < 0.005)) c.y += 0.02;
+    }
+    c.x = Math.min(1 - c.w, Math.max(0, c.x));
+    c.y = Math.min(1 - c.h, Math.max(0, c.y));
+    doc.fields.push(c);
+    selected = c.id;
+    renderFields();
+    renderSidebar();
+    scheduleSave();
+    toast(`Field pasted on page ${page + 1}`);
+  }
+  // The page you last clicked, else the one most in view.
+  let currentPage = 0;
+  function visiblePage() {
+    const mid = window.innerHeight / 2;
+    let best = currentPage;
+    let bestDist = Infinity;
+    pages.forEach((p, pi) => {
+      const r = p.layer.getBoundingClientRect();
+      const d = r.top <= mid && r.bottom >= mid ? 0 : Math.min(Math.abs(r.top - mid), Math.abs(r.bottom - mid));
+      if (d < bestDist) { best = pi; bestDist = d; }
+    });
+    return best;
   }
   function copyToAllPages(f) {
     let n = 0;
@@ -900,12 +1074,22 @@ function showEditor(doc) {
   const hideCtx = () => ctx.classList.add('hidden');
   document.addEventListener('click', hideCtx);
   function showCtx(f, x, y) {
-    ctx.innerHTML = `<button data-a="copy">⧉ Copy field</button><button data-a="del">🗑 Delete field</button><button data-a="all">⎘ Copy field to all pages</button>`;
+    ctx.innerHTML = `<button data-a="clip">📋 Copy (Ctrl+C)</button><button data-a="copy">⧉ Duplicate field</button><button data-a="del">🗑 Delete field</button><button data-a="all">⎘ Copy field to all pages</button>`;
     Object.assign(ctx.style, { left: `${x}px`, top: `${y}px` });
     ctx.classList.remove('hidden');
+    ctx.querySelector('[data-a=clip]').onclick = () => copyToClipboard(f);
     ctx.querySelector('[data-a=copy]').onclick = () => copyField(f);
     ctx.querySelector('[data-a=del]').onclick = () => deleteField(f);
     ctx.querySelector('[data-a=all]').onclick = () => copyToAllPages(f);
+  }
+  // Right-click on an empty part of a page: paste the copied field there.
+  function showPasteCtx(page, at, x, y) {
+    if (!fieldClipboard.get()) return false;
+    ctx.innerHTML = '<button data-a="paste">📋 Paste field here (Ctrl+V)</button>';
+    Object.assign(ctx.style, { left: `${x}px`, top: `${y}px` });
+    ctx.classList.remove('hidden');
+    ctx.querySelector('[data-a=paste]').onclick = () => pasteField(page, at);
+    return true;
   }
 
   // ----- Fields on the page -----
@@ -1015,8 +1199,21 @@ function showEditor(doc) {
   }
 
   document.onkeydown = (e) => {
-    const typing = /INPUT|TEXTAREA|SELECT/.test(document.activeElement.tagName);
+    const typing = /INPUT|TEXTAREA|SELECT/.test(document.activeElement.tagName) || document.activeElement.isContentEditable;
     if ((e.key === 'Delete' || e.key === 'Backspace') && selected && !typing) deleteField(selField());
+    const mod = e.ctrlKey || e.metaKey;
+    if (mod && !typing && e.key.toLowerCase() === 'c' && selField() && !window.getSelection()?.toString()) {
+      e.preventDefault();
+      copyToClipboard(selField());
+    }
+    if (mod && !typing && e.key.toLowerCase() === 'v' && pages.length) {
+      e.preventDefault();
+      pasteField(selField() ? selField().page : visiblePage());
+    }
+    if (mod && !typing && e.key.toLowerCase() === 'd' && selField()) {
+      e.preventDefault();
+      copyField(selField());
+    }
     if (e.key === 'Escape') {
       placing = null;
       selected = null;
@@ -1058,7 +1255,14 @@ function showEditor(doc) {
   renderPdf(`/api/documents/${doc.id}/original`, $('#pages')).then((ps) => {
     pages = ps;
     pages.forEach((p, pi) => {
+      p.layer.oncontextmenu = (e) => {
+        if (e.target !== p.layer) return;
+        const rect = p.layer.getBoundingClientRect();
+        if (showPasteCtx(pi, { x: (e.clientX - rect.left) / rect.width, y: (e.clientY - rect.top) / rect.height }, e.clientX, e.clientY)) e.preventDefault();
+      };
       p.layer.onpointerdown = (e) => {
+        if (e.button === 2) return;
+        currentPage = pi;
         hideCtx();
         if (pinning) {
           const rect = p.layer.getBoundingClientRect();

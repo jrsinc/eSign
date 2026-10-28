@@ -17,13 +17,45 @@ function alreadySigned() {
     <p>You signed ${info.agreementId ? `agreement <strong>${esc(info.agreementId)}</strong>` : ''} "${esc(info.title)}"${info.signer.signedAt ? ` on ${esc(new Date(info.signer.signedAt).toLocaleString())}` : ''}.</p>
     <p class="muted">This signing link is no longer valid. ${done
       ? 'All parties have signed. The completed agreement was emailed to you as a PDF attachment.'
-      : 'The completed agreement will be emailed to you as a PDF attachment once everyone has signed.'}</p>`);
+      : 'The completed agreement will be emailed to you as a PDF attachment once everyone has signed.'}</p>
+    ${info.canRequestAccount ? accountOffer() : ''}`);
+  bindAccountOffer();
+}
+
+// Sign in on the dashboard's sign-in page, then come straight back here.
+const signInUrl = (email) => `/?next=${encodeURIComponent(location.pathname + location.search)}&email=${encodeURIComponent(email)}`;
+
+// The server refused because this browser is not signed in as the invited recipient.
+function identityPage(d) {
+  const { reason, invitedEmail, loggedInAs } = d.identity;
+  $('#company').textContent = d.company || 'eSign';
+  const doc = `${d.agreementId ? `Agreement <strong>${esc(d.agreementId)}</strong> ` : 'The document '}"${esc(d.title || '')}"`;
+  if (reason === 'login') {
+    message('Sign in to continue', `
+      <p>${doc} was sent to <strong>${esc(invitedEmail)}</strong>.</p>
+      <p class="muted">You have an account with this email. Sign in with it to view and sign the document.</p>
+      <a class="btn primary" href="${esc(signInUrl(invitedEmail))}">Sign in as ${esc(invitedEmail)}</a>`);
+  } else if (reason === 'mismatch') {
+    message('Wrong account', `
+      <p>You are logged in as <strong>${esc(loggedInAs)}</strong>, but this document was sent to <strong>${esc(invitedEmail)}</strong>.</p>
+      <p class="muted">Please log out and log in with ${esc(invitedEmail)}, or contact the sender.</p>
+      <div class="row" style="justify-content:center;gap:8px">
+        <button id="idLogout">Log out</button>
+        <button id="idSwitch" class="primary">Switch account</button>
+      </div>`);
+    const logout = () => api('/api/logout', { method: 'POST' }).catch(() => {});
+    $('#idLogout').onclick = async () => { await logout(); location.reload(); };
+    $('#idSwitch').onclick = async () => { await logout(); location.href = signInUrl(invitedEmail); };
+  } else {
+    message('Can\'t sign with this account', `<p>${esc(d.error)}</p>`);
+  }
 }
 
 async function load() {
   try {
     info = await api(`/api/sign/${encodeURIComponent(token)}`);
   } catch (e) {
+    if (e.data?.identity) return identityPage(e.data);
     return message('Link not valid', `<p class="muted">${esc(e.message)} Please contact the sender.</p>`);
   }
   $('#company').textContent = info.company;
@@ -44,10 +76,13 @@ async function load() {
         <h1 style="margin-bottom:4px">${esc(info.title)}</h1>
         <p class="muted" style="margin:0">Hi ${esc(info.signer.name)}, please review the document and complete the highlighted fields.</p>
         ${info.message ? `<p style="white-space:pre-line;margin:10px 0 0;padding:10px;background:#f9fafb;border-radius:8px">${esc(info.message)}</p>` : ''}
+        <div id="identity"></div>
       </div>
       <div class="pages" id="pages"></div>
     </div>`;
   $('#bar').classList.remove('hidden');
+  renderIdentity();
+  $('#consent').onchange = updateProgress;
 
   const pages = await renderPdf(`/api/sign/${encodeURIComponent(token)}/file`, $('#pages'));
   fieldEls = info.fields.map((f) => {
@@ -68,23 +103,25 @@ async function load() {
       el.style.justifyContent = { center: 'center', right: 'flex-end' }[st.align] || 'flex-start';
       el.classList.add('done');
     };
+    // Company and title are the same everywhere they appear.
+    const changed = (value) => {
+      values[f.id] = value;
+      el.classList.toggle('done', !!value.trim() || !f.required);
+      if (f.type === 'company' || f.type === 'title') {
+        for (const o of fieldEls) if (o.f.type === f.type && o.f.id !== f.id) {
+          values[o.f.id] = value;
+          o.el.setValue(value);
+          o.el.classList.toggle('done', !!value.trim() || !o.f.required);
+        }
+      }
+      updateProgress();
+    };
     const input = (type, placeholder) => {
       const inp = styled(document.createElement('input'));
       inp.type = type;
       inp.placeholder = placeholder;
-      inp.oninput = inp.onchange = () => {
-        values[f.id] = inp.value;
-        el.classList.toggle('done', !!inp.value.trim() || !f.required);
-        // Company and title are the same everywhere they appear.
-        if (f.type === 'company' || f.type === 'title') {
-          for (const o of fieldEls) if (o.f.type === f.type && o.f.id !== f.id) {
-            values[o.f.id] = inp.value;
-            o.el.querySelector('input').value = inp.value;
-            o.el.classList.toggle('done', !!inp.value.trim() || !o.f.required);
-          }
-        }
-        updateProgress();
-      };
+      inp.oninput = inp.onchange = () => changed(inp.value);
+      el.setValue = (v) => { inp.value = v; };
       el.append(inp);
       if (!f.required) el.classList.add('done');
     };
@@ -95,7 +132,14 @@ async function load() {
       case 'email': auto(info.signer.email); break;
       case 'datefield': input('date', f.label || 'Date'); break;
       case 'number': input('number', f.label || 'Number'); break;
-      case 'company': input('text', f.label || 'Company'); break;
+      case 'company': {
+        if (!info.companies?.length) { input('text', f.label || 'Company'); break; }
+        const pick = companyPicker({ placeholder: f.label || 'Company', styled, compact: true, onChange: changed });
+        el.setValue = pick.set;
+        el.append(pick.node);
+        if (!f.required) el.classList.add('done');
+        break;
+      }
       case 'title': input('text', f.label || 'Title'); break;
       case 'text': input('text', f.label || (f.required ? 'Required' : 'Optional')); break;
       case 'dropdown': {
@@ -199,7 +243,7 @@ async function load() {
     for (const { f, el } of fieldEls) {
       if (f.type !== type) continue;
       values[f.id] = known;
-      el.querySelector('input').value = known;
+      el.setValue(known);
       el.classList.add('done');
       el.title = 'Filled from your previous agreement. Please check it.';
     }
@@ -211,6 +255,42 @@ async function load() {
     if (!group.some((o) => o.f.required)) el.classList.add('done');
   }
   updateProgress();
+}
+
+// Company dropdown from the administrators' list, with "Other" to type a name that isn't listed.
+// `compact` (a field on the page) shows either the list or the text box; otherwise both stack.
+function companyPicker({ placeholder, styled = (n) => n, compact = false, onChange, select, other }) {
+  const OTHER = '__other';
+  const sel = select || styled(document.createElement('select'));
+  sel.innerHTML = `<option value="">${esc(placeholder)}: choose…</option>${info.companies.map((c) => `<option>${esc(c)}</option>`).join('')}<option value="${OTHER}">Other (type the company name)</option>`;
+  const box = other || styled(Object.assign(document.createElement('input'), { type: 'text', maxLength: 120 }));
+  box.placeholder = 'Type the company name';
+  const show = (isOther) => {
+    box.hidden = !isOther;
+    if (compact) sel.hidden = isOther;
+  };
+  const value = () => (sel.value === OTHER ? box.value.trim() : sel.value);
+  sel.onchange = () => {
+    show(sel.value === OTHER);
+    if (sel.value === OTHER) box.focus();
+    onChange?.(value());
+  };
+  box.oninput = () => onChange?.(value());
+  // Back to the list when the typed name is cleared.
+  box.onblur = () => {
+    if (compact && !box.value.trim()) { sel.value = ''; show(false); onChange?.(''); }
+  };
+  const set = (v) => {
+    v = String(v || '').trim();
+    const match = info.companies.find((c) => c.toLowerCase() === v.toLowerCase());
+    if (!v || match) { sel.value = match || ''; box.value = ''; show(false); } else { sel.value = OTHER; box.value = v; show(true); }
+  };
+  show(false);
+  const node = document.createElement('span');
+  node.style.display = 'contents';
+  if (!select) node.append(sel);
+  if (!other) node.append(box);
+  return { node, set, value, sel, box };
 }
 
 function remaining() {
@@ -256,6 +336,45 @@ function updateProgress() {
   const left = remaining().length;
   $('#progress').textContent = left ? `${left} required field${left > 1 ? 's' : ''} left` : 'All fields complete';
   $('#nextBtn').classList.toggle('hidden', !left);
+  // Finish stays off until every required field is complete and the consent box is ticked.
+  const ready = !left && $('#consent').checked;
+  $('#finishBtn').disabled = !ready;
+  $('#finishBtn').title = ready ? '' : left ? 'Complete all required fields first' : 'Tick the consent box first';
+}
+
+// Who is signing: the account signed in here (flow A), or the invited email that receives a temporary
+// password (flow B). The email can't be changed.
+function renderIdentity(note = '') {
+  const a = info.auth;
+  const locked = a.lockedUntil && Date.parse(a.lockedUntil) > Date.now();
+  const lockLine = locked ? `<div class="identity warn" style="margin-top:8px">Signing is locked after too many wrong passwords until ${esc(new Date(a.lockedUntil).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }))}. The sender has been notified.</div>` : '';
+  if (a.flow === 'account') {
+    $('#identity').innerHTML = `<div class="identity">🔒 Signing as <strong>${esc(a.signedInAs)}</strong>. You'll confirm with your account password when you sign.</div>${lockLine}`;
+    return;
+  }
+  const status = note || (a.tempError ? `<span style="color:var(--danger)">${esc(a.tempError)}</span>`
+    : a.tempSent ? `Temporary password sent to <strong>${esc(a.invitedEmail)}</strong>. Check your inbox (and spam). It's valid for ${a.tempMinutes} minutes and works once.` : '');
+  $('#identity').innerHTML = `
+    <div class="identity">
+      <label for="invitedEmail" style="margin:0">This document was sent to</label>
+      <input id="invitedEmail" type="email" value="${esc(a.invitedEmail)}" readonly aria-readonly="true">
+      <div id="tempStatus">${status}</div>
+      <p class="small muted" style="margin:6px 0 0">You can view and fill in the document now. To sign, you'll enter the temporary password.
+      <a href="#" id="sendTemp">Send a new temporary password</a></p>
+    </div>${lockLine}`;
+  $('#sendTemp').onclick = (e) => { e.preventDefault(); sendTempPassword(); };
+}
+
+async function sendTempPassword() {
+  try {
+    const r = await api(`/api/sign/${encodeURIComponent(token)}/temp-password`, { method: 'POST' });
+    info.auth.tempSent = info.auth.tempValid = true;
+    info.auth.tempError = '';
+    const msg = `Temporary password sent to <strong>${esc(r.sentTo)}</strong>. Check your inbox (and spam). It's valid for ${r.minutes} minutes and works once.`;
+    if ($('#tempStatus')) $('#tempStatus').innerHTML = msg;
+    if (!$('#pwModal').classList.contains('hidden')) { $('#pwHelp').innerHTML = msg; $('#pwErr').textContent = ''; }
+    toast('Temporary password sent');
+  } catch (e) { toast(e.message, 4000); }
 }
 
 $('#nextBtn').onclick = () => {
@@ -465,20 +584,38 @@ $('#finishBtn').onclick = async () => {
 };
 
 // Final step: title and company for the signature page, plus the reason for signing.
+let sgCompanyPick = null;
 function confirmAndSign() {
   // Each detail is asked once: a Title/Company field on the document is shown read-only for checking;
   // otherwise the box is pre-filled from this person's previous agreement, ready to verify.
   const fromField = (type) => fieldEls.find((o) => o.f.type === type);
   let prefilled = false;
+  // With a company list, the company box becomes a dropdown (the text box is used for "Other").
+  if (info.companies?.length && !sgCompanyPick) {
+    const sel = document.createElement('select');
+    sel.id = 'sgCompanySel';
+    $('#sgCompany').before(sel);
+    $('label[for=sgCompany]').htmlFor = 'sgCompanySel';
+    sgCompanyPick = companyPicker({ placeholder: 'Company', select: sel, other: $('#sgCompany') });
+    sgCompanyPick.box.style.marginTop = '6px';
+  }
   for (const [type, input] of [['title', $('#sgTitle')], ['company', $('#sgCompany')]]) {
     const field = fromField(type);
+    const pick = type === 'company' ? sgCompanyPick : null;
     const note = input.nextElementSibling?.classList.contains('verify-note') ? input.nextElementSibling : null;
     note?.remove();
     input.readOnly = !!field;
     input.classList.toggle('verified', !!field);
     if (field) {
+      // Read-only: show what was entered in the document, as text.
+      if (pick) { pick.sel.hidden = true; input.hidden = false; }
       input.value = values[field.f.id] || '';
       input.insertAdjacentHTML('afterend', '<div class="verify-note small muted">✓ As entered in the document</div>');
+    } else if (pick) {
+      pick.sel.hidden = false;
+      const current = pick.value() || input.value || info.profile?.[type] || '';
+      if (!pick.value() && !input.value && info.profile?.[type]) prefilled = true;
+      pick.set(current);
     } else if (!input.value && info.profile?.[type]) {
       input.value = info.profile[type];
       prefilled = true;
@@ -506,36 +643,117 @@ $('#reasonOk').onclick = () => {
     if (!reason) return toast('Please type your reason');
   }
   $('#reasonModal').classList.add('hidden');
-  submit(reason, $('#sgTitle').value.trim(), $('#sgCompany').value.trim());
+  const company = sgCompanyPick && !$('#sgCompany').readOnly ? sgCompanyPick.value() : $('#sgCompany').value.trim();
+  const title = $('#sgTitle').value.trim();
+  askPassword({
+    action: 'sign', meaning: reason,
+    send: (password) => {
+      const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+      return api(`/api/sign/${encodeURIComponent(token)}`, { method: 'POST', body: { consent: true, values, reason, title, company, tz, appearance, password } });
+    },
+    done: signedPage,
+  });
 };
 
-async function submit(reason, title, company) {
-  $('#finishBtn').disabled = true;
-  $('#finishBtn').textContent = 'Signing…';
-  try {
-    const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
-    const r = await api(`/api/sign/${encodeURIComponent(token)}`, { method: 'POST', body: { consent: true, values, reason, title, company, tz, appearance } });
-    window.scrollTo(0, 0);
-    message('Signed successfully ✓', `
-      <p>Thank you, ${esc(info.signer.name)}. Your signature on ${info.agreementId ? `agreement <strong>${esc(info.agreementId)}</strong>` : 'this agreement'} has been recorded.</p>
-      <p class="muted">${r.completed
-        ? 'All parties have signed. The completed agreement has been emailed to you as a PDF attachment.'
-        : 'The completed agreement will be emailed to you as a PDF attachment once everyone has signed.'}
-      This signing link is no longer valid.</p>`);
-  } catch (e) {
-    toast(e.message, 4000);
-    $('#finishBtn').disabled = false;
-    $('#finishBtn').textContent = 'Finish';
-  }
+// The final confirmation: shows what is being signed and by whom, and asks for the account password
+// (flow A) or the temporary password (flow B). The server checks it; wrong ones count toward a lock.
+function askPassword({ action, meaning, send, done }) {
+  const a = info.auth;
+  const signing = action === 'sign';
+  $('#pwTitle').textContent = a.flow === 'account'
+    ? (signing ? 'Confirm signing with your password' : 'Confirm declining with your password')
+    : `Enter the temporary password sent to ${a.invitedEmail} to ${signing ? 'sign' : 'decline'}`;
+  $('#pwSummary').innerHTML = [
+    ['Document', info.title], ['Agreement ID', info.agreementId], ['Signer', info.signer.name], ['Invited email', a.invitedEmail],
+    [signing ? 'Meaning of signature' : 'Action', signing ? (meaning || 'Signature') : `Decline to sign${meaning ? `: ${meaning}` : ''}`],
+  ].filter(([, v]) => v).map(([k, v]) => `<tr><th>${esc(k)}</th><td>${esc(v)}</td></tr>`).join('');
+  $('#pwLabel').textContent = a.flow === 'account' ? `Your account password (${a.signedInAs})` : 'Temporary password';
+  $('#signPw').autocomplete = a.flow === 'account' ? 'current-password' : 'one-time-code';
+  $('#signPw').value = '';
+  $('#pwErr').textContent = '';
+  $('#pwHelp').innerHTML = a.flow === 'account'
+    ? 'Your password confirms it is you signing, at this moment.'
+    : `${a.tempValid ? 'Check your inbox (and spam) for the email with the temporary password.' : 'Your temporary password has expired or was not sent yet.'} <a href="#" id="pwResend">Send a new one</a>`;
+  $('#pwResend')?.addEventListener('click', (e) => { e.preventDefault(); sendTempPassword(); });
+  $('#pwOk').textContent = signing ? 'Sign' : 'Decline';
+  $('#pwOk').classList.toggle('danger', !signing);
+  $('#pwOk').disabled = false;
+  $('#pwModal').classList.remove('hidden');
+  $('#signPw').focus();
+  $('#pwCancel').onclick = () => $('#pwModal').classList.add('hidden');
+  $('#signPw').onkeydown = (e) => { if (e.key === 'Enter') $('#pwOk').click(); };
+  $('#pwOk').onclick = async () => {
+    const password = $('#signPw').value;
+    if (!password) return $('#signPw').focus();
+    $('#pwOk').disabled = true;
+    $('#pwOk').textContent = signing ? 'Signing…' : 'Declining…';
+    try {
+      const r = await send(password);
+      $('#pwModal').classList.add('hidden');
+      done(r);
+    } catch (e) {
+      $('#pwOk').disabled = false;
+      $('#pwOk').textContent = signing ? 'Sign' : 'Decline';
+      $('#pwErr').textContent = e.message;
+      $('#signPw').value = '';
+      $('#signPw').focus();
+      if (e.status === 423) {
+        // Locked: no more tries for now.
+        $('#pwOk').disabled = true;
+        info.auth.lockedUntil = new Date(Date.now() + 30 * 60000).toISOString();
+        renderIdentity();
+      }
+      if (e.data?.tempExpired || e.data?.tempMissing) info.auth.tempValid = false;
+      if (e.data?.identity) { $('#pwModal').classList.add('hidden'); identityPage(e.data); }
+    }
+  };
+}
+
+function signedPage(r) {
+  window.scrollTo(0, 0);
+  const c = r.confirmation;
+  message('Signed successfully ✓', `
+    <table class="sign-summary" style="text-align:left">
+      <tr><th>Signed by</th><td>${esc(c.name)}</td></tr>
+      <tr><th>Email</th><td>${esc(c.email)}</td></tr>
+      <tr><th>Date and time</th><td>${esc(new Date(c.signedAt).toLocaleString([], { dateStyle: 'medium', timeStyle: 'long' }))}</td></tr>
+      ${c.reason ? `<tr><th>Meaning</th><td>${esc(c.reason)}</td></tr>` : ''}
+      ${c.agreementId ? `<tr><th>Agreement</th><td>${esc(c.agreementId)}: ${esc(c.title)}</td></tr>` : ''}
+    </table>
+    <p class="muted">${r.completed
+      ? 'All parties have signed. The completed agreement has been emailed to you as a PDF attachment.'
+      : 'The completed agreement will be emailed to you as a PDF attachment once everyone has signed.'}
+    This signing link is no longer valid.</p>
+    ${r.canRequestAccount ? accountOffer() : ''}`);
+  bindAccountOffer();
+}
+
+// Optional, after signing only: ask the administrators for an account for future documents.
+const accountOffer = () => `
+  <div class="identity" id="acctOffer" style="text-align:left">
+    <strong>Create an account with this email for future documents?</strong>
+    <p class="small muted" style="margin:4px 0 8px">Optional. Without one, you'll keep signing with a temporary password emailed to you.</p>
+    <button id="acctYes" class="primary">Yes, request an account</button> <button id="acctNo" class="ghost">No thanks</button>
+  </div>`;
+function bindAccountOffer() {
+  if (!$('#acctOffer')) return;
+  $('#acctNo').onclick = () => $('#acctOffer').remove();
+  $('#acctYes').onclick = async () => {
+    try {
+      await api(`/api/sign/${encodeURIComponent(token)}/request-account`, { method: 'POST' });
+      $('#acctOffer').innerHTML = '<strong>Request sent.</strong> An administrator will set up your account and email you your sign-in details.';
+    } catch (e) { toast(e.message, 4000); }
+  };
 }
 
 $('#declineBtn').onclick = async () => {
   const reason = prompt('Decline to sign? The sender will be notified and the document will be cancelled.\nReason (optional):');
   if (reason === null) return;
-  try {
-    await api(`/api/sign/${encodeURIComponent(token)}/decline`, { method: 'POST', body: { reason } });
-    message('You declined to sign', '<p class="muted">The sender has been notified.</p>');
-  } catch (e) { toast(e.message); }
+  askPassword({
+    action: 'decline', meaning: reason.trim(),
+    send: (password) => api(`/api/sign/${encodeURIComponent(token)}/decline`, { method: 'POST', body: { reason, password } }),
+    done: () => message('You declined to sign', '<p class="muted">The sender has been notified.</p>'),
+  });
 };
 
 load();

@@ -1,5 +1,7 @@
 node_modules/
 data/
+backups/
+*.esbackup
 .claude/
 .env
 desktop/dist/

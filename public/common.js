@@ -84,6 +84,30 @@ async function renderThumb(pdfPage, canvas, extraRotation = 0, width = 140) {
   await pdfPage.render({ canvasContext: canvas.getContext('2d'), viewport: vp, intent: 'print' }).promise;
 }
 
+// Every password box gets a Show / Hide button, wherever it appears (sign-in, setup, signing).
+function addPasswordToggle(input) {
+  if (input.closest('.pw-wrap')) return;
+  const wrap = document.createElement('span');
+  wrap.className = 'pw-wrap';
+  input.replaceWith(wrap);
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'pw-toggle';
+  btn.textContent = 'Show';
+  btn.setAttribute('aria-label', 'Show password');
+  btn.onclick = () => {
+    const show = input.type === 'password';
+    input.type = show ? 'text' : 'password';
+    btn.textContent = show ? 'Hide' : 'Show';
+    btn.setAttribute('aria-label', show ? 'Hide password' : 'Show password');
+    input.focus();
+  };
+  wrap.append(input, btn);
+}
+const addPasswordToggles = () => document.querySelectorAll('input[type=password]').forEach(addPasswordToggle);
+new MutationObserver(addPasswordToggles).observe(document.documentElement, { childList: true, subtree: true });
+document.addEventListener('DOMContentLoaded', addPasswordToggles);
+
 async function api(url, opts = {}) {
   const init = { ...opts, headers: { ...(opts.headers || {}) } };
   if (opts.body && !(opts.body instanceof FormData)) {
@@ -96,6 +120,7 @@ async function api(url, opts = {}) {
     const err = new Error(data?.error || `Request failed (${res.status})`);
     err.status = res.status;
     err.restart = !!data?.restart;
+    err.data = data;
     // Session ended (inactivity, disabled account…): the dashboard returns to sign-in.
     if (res.status === 401 && !/^\/api\/(login|auth|password)/.test(url) && window.onUnauthorized) window.onUnauthorized(err.message);
     throw err;
