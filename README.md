@@ -46,15 +46,13 @@ Copy `.env.example` to `.env`, fill it in, and restart. Every setting is explain
 | `NOTIFY_EMAIL` | Copy of "signed", "declined", "completed" and "signing locked" notices | off |
 | `SESSION_IDLE_MINUTES`, `TRUST_PROXY`, `PKI_COUNTRY` | Advanced | `30`, private networks, `US` |
 
-### Email with Microsoft 365 (Outlook)
+### Email
 
-1. Pick a mailbox to send from, e.g. `esign@yourcompany.com` (a normal licensed user or shared mailbox with a password).
-2. In the **Microsoft 365 admin center** → Users → that user → **Mail** → *Manage email apps* → tick **Authenticated SMTP**. (Tenant-wide SMTP AUTH must not be disabled.)
-3. If the mailbox uses MFA, create an **app password** for it and use that as `SMTP_PASS`.
-4. In `.env`: `SMTP_HOST=smtp.office365.com`, `SMTP_PORT=587`, `SMTP_USER` and `MAIL_FROM` = that mailbox.
-5. Restart, then add a test user with your own email: the welcome email confirms sending works.
+All email is sent from `esign-jrsllc@method365sign.com`, the company mailbox on the webhostbox cPanel server:
 
-Gmail / Google Workspace: `SMTP_HOST=smtp.gmail.com`, `SMTP_PORT=587`, and an App Password.
+1. In `.env`: `SMTP_HOST=sh00007.webhostbox.net`, `SMTP_PORT=465`, `SMTP_SECURE=true`, and `SMTP_USER`, `MAIL_FROM`, `NOTIFY_EMAIL`, `SUPPORT_EMAIL` = `esign-jrsllc@method365sign.com`. Put the mailbox password in `SMTP_PASS`.
+2. Make sure the domain's SPF, DKIM and DMARC records exist (see [PRODUCTION.md](PRODUCTION.md) section 6).
+3. Restart, then add a test user with an outside email: the welcome email confirms sending works.
 
 ## Going live
 

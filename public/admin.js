@@ -586,12 +586,12 @@ async function showList() {
     ? docs.map((d) => `
       <tr class="click" data-id="${d.id}">
         <td class="small" style="font-family:var(--font);white-space:nowrap">${d.agreementId ? esc(d.agreementId) : '<span class="muted">Draft</span>'}</td>
-        <td><strong>${esc(d.title)}</strong></td>
+        <td><strong>${esc(d.title)}</strong>${d.senderName ? `<div class="small muted">${d.access === 'recipient' ? 'Sent to you by' : 'Sent by'} ${esc(d.senderName)}</div>` : ''}</td>
         <td><span class="badge ${d.status}">${statusLabel(d.status)}</span></td>
         <td class="small">${d.signers.map((s, i) => `${i + 1}. ${esc(s.name)} <span class="badge ${s.status}">${s.status}</span>`).join('<br>') || '<span class="muted">—</span>'}</td>
         <td class="small muted">${when(d.createdAt)}</td>
       </tr>`).join('')
-    : '<tr><td colspan="5" class="muted">No documents yet. Upload a PDF to get started.</td></tr>';
+    : `<tr><td colspan="5" class="muted">No documents yet. Upload a PDF to get started.${me.user.role === 'admin' ? '' : ' You see the agreements you sent and the ones sent to you.'}</td></tr>`;
   app.querySelectorAll('tr.click').forEach((tr) => (tr.onclick = () => (location.hash = `#/doc/${tr.dataset.id}`)));
 }
 
@@ -1482,7 +1482,7 @@ function showDetail(doc) {
     ${done ? `<a class="btn" href="/api/documents/${doc.id}/print.pdf?tz=${encodeURIComponent(Intl.DateTimeFormat().resolvedOptions().timeZone)}" target="_blank" title="A copy stamped PRINTED COPY with your name and the time on every page">🖨 Print copy</a>` : ''}
     ${me.user.can.downloadAudit ? `<a class="btn" href="/api/documents/${doc.id}/audit.pdf" title="Download this agreement's audit trail as a PDF">⬇ Audit trail (PDF)</a>` : ''}
     ${done ? `<a class="btn primary" href="/api/documents/${doc.id}/signed">Download signed PDF</a>` : ''}
-    ${doc.status === 'sent' ? '<button id="voidBtn" class="danger">Cancel agreement</button>' : ''}`;
+    ${doc.status === 'sent' && doc.access !== 'recipient' ? '<button id="voidBtn" class="danger">Cancel agreement</button>' : ''}`;
   const sequential = doc.signingOrder === 'sequential';
   const current = doc.signers.filter((s) => s.link).map((s) => s.order);
 
@@ -1496,7 +1496,8 @@ function showDetail(doc) {
           <p class="small muted" style="margin:10px 0 0">Transaction ID: ${esc(doc.transactionId || doc.id)}<br>Sent ${when(doc.sentAt)}${done ? `<br>Completed ${when(doc.completedAt)}` : ''}
           ${doc.status === 'voided' ? `<br>Cancelled ${when(doc.cancelledAt)}${doc.cancelReason ? `<br>Reason: ${esc(doc.cancelReason)}` : ''}` : ''}
           ${doc.status === 'sent' ? `<br>Reminders: ${REMINDER_LABELS[doc.reminder || 'none']}` : ''}</p>
-          ${done && doc.locked ? `<div class="locked">🔒 <strong>Locked.</strong> Certified by ${esc(me.company)} ${esc(me.app)}: no changes allowed. Any edit breaks the signatures.</div>` : ''}
+          ${done && doc.locked ? `<div class="locked">🔒 <strong>Locked.</strong> Certified by ${esc(me.company)} ${esc(me.app)}: no changes allowed. Any edit breaks the signatures.${doc.protected ? ' The PDF can be printed, but its text can\'t be copied or edited.' : ''}</div>` : ''}
+          ${doc.access === 'recipient' ? `<p class="small muted">Sent to you by ${esc(doc.senderName || 'the sender')}. ${doc.status === 'sent' ? 'Use the signing link in your email to sign.' : ''}</p>` : ''}
           ${done ? `<p class="small muted" style="word-break:break-all">Signed file SHA-256:<br>${doc.finalHash}</p>` : ''}
         </section>
         <section>

@@ -75,22 +75,31 @@ For HTTPS use **Caddy** (`deploy/Caddyfile`, change `esign:3000` to `127.0.0.1:3
 
 ## 6. Email from esign-jrsllc@method365sign.com
 
-**Microsoft 365**
-- `SMTP_HOST=smtp.office365.com`, `SMTP_PORT=587`, `SMTP_USER` and `MAIL_FROM` = the mailbox.
-- In the Microsoft 365 admin center → the mailbox → *Mail* → *Manage email apps* → enable **Authenticated SMTP**.
-- Microsoft is retiring password-based SMTP sign-in. If it's blocked for your tenant, either use a
-  sending service (Amazon SES, SendGrid, Postmark: they give SMTP settings that work here unchanged),
-  or ask for OAuth2 sign-in support to be added to the app.
+All email (signing links, temporary passwords, sign-in codes, notices) is sent from the company
+mailbox on the webhostbox cPanel server. Use this one address everywhere: `MAIL_FROM`, `SMTP_USER`,
+`NOTIFY_EMAIL` and `SUPPORT_EMAIL`.
 
-**Google Workspace**
-- `SMTP_HOST=smtp.gmail.com`, `SMTP_PORT=587`, and an **App Password** for the mailbox (needs 2-Step Verification).
+| Setting | Value |
+|---|---|
+| `SMTP_HOST` | `sh00007.webhostbox.net` |
+| `SMTP_PORT` / `SMTP_SECURE` | `465` / `true` |
+| `SMTP_USER`, `MAIL_FROM`, `NOTIFY_EMAIL`, `SUPPORT_EMAIL` | `esign-jrsllc@method365sign.com` |
+| `SMTP_PASS` | the mailbox password |
 
-**DNS for method365sign.com** (your DNS or email admin sets these once):
-- **SPF**: a TXT record allowing your provider to send, e.g. `v=spf1 include:spf.protection.outlook.com -all`
-- **DKIM**: turn it on in the provider's admin console and add the records it gives you
-- **DMARC**: e.g. `v=DMARC1; p=none; rua=mailto:dmarc@method365sign.com` (tighten to `quarantine` later)
+**DNS for method365sign.com** (at whois.com, where the domain is registered; mail server IP `66.116.209.229`):
 
-Then sign in, add a test user with your own email and check the welcome email arrives in the **inbox**.
+| Type | Name | Value |
+|---|---|---|
+| A | `mail` | `66.116.209.229` |
+| MX | `@` | `mail.method365sign.com` (priority 10) |
+| TXT | `@` | SPF value from cPanel → *Email Deliverability* (e.g. `v=spf1 +a +mx +ip4:66.116.209.229 ~all`) |
+| TXT | `default._domainkey` | DKIM value from cPanel → *Email Deliverability* |
+| TXT | `_dmarc` | `v=DMARC1; p=none; rua=mailto:esign-jrsllc@method365sign.com` (tighten to `quarantine` later) |
+
+Without SPF and DKIM, Gmail and Outlook reject or junk the emails. Check the records at
+cPanel → *Email Deliverability* (all green), then add a test user with an outside email address and
+confirm the welcome email arrives in the **inbox**. If the shared server's sending limits or reputation
+cause problems later, a sending service (Brevo, Amazon SES, Postmark) works by changing only these settings.
 
 ## 7. Moving your current data from this PC
 

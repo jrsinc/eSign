@@ -28,7 +28,8 @@ const PORT = Number(process.env.PORT || 3000);
 const BASE_URL = (process.env.BASE_URL || `http://localhost:${PORT}`).replace(/\/$/, '');
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'admin';
 const { COMPANY, APP_NAME } = require('./lib/brand');
-const SENDER_EMAIL = process.env.NOTIFY_EMAIL || process.env.MAIL_FROM || '';
+// The system's own address: used in the company seal certificate that certifies completed agreements.
+const SENDER_EMAIL = process.env.MAIL_FROM || process.env.SMTP_USER || process.env.NOTIFY_EMAIL || '';
 // The app's own certificate authority for digital signatures (created on first run in data/pki).
 let CA = loadOrCreateCA(path.join(store.DATA_DIR, 'pki'), COMPANY);
 const AGREEMENT_PREFIX = String(process.env.AGREEMENT_PREFIX || 'AGR').replace(/[^A-Za-z0-9]/g, '').slice(0, 10) || 'AGR';
@@ -635,13 +636,15 @@ async function mergePdfs(buffers) {
 // What the dashboard may see of an agreement. The audit trail is included only for administrators
 // and for users an administrator gave "view audit trail" access.
 function adminView(doc, req) {
-  const { sources, ...rest } = doc;
+  const { sources, plainFile, ...rest } = doc;
   const seeAudit = can(req.user, 'viewAudit');
+  const access = docAccess(req.user, doc);
   return {
     ...rest,
-    // A signer only has a link once it is their turn (see issueLinks).
-    // The temporary signing password belongs to the recipient alone: the sender never receives it.
-    signers: doc.signers.map(({ token, tempPw, signFailed, ...s }) => ({ ...s, tempPasswordSent: !!tempPw, link: token && doc.status === 'sent' ? signLink({ token }) : null })),
+    access,
+    // A signer only has a link once it is their turn (see issueLinks); only the sender and
+    // administrators see the links. The temporary signing password belongs to the recipient alone.
+    signers: doc.signers.map(({ token, tempPw, signFailed, ...s }) => ({ ...s, tempPasswordSent: !!tempPw, link: token && doc.status === 'sent' && access !== 'recipient' ? signLink({ token }) : null })),
     fields: doc.fields.map((f) => ({ ...f, value: f.type === 'signature' || f.type === 'initials' ? (f.value ? '[signed]' : null) : f.value })),
     comments: doc.comments || [],
     events: seeAudit ? doc.events : [],
@@ -650,10 +653,33 @@ function adminView(doc, req) {
   };
 }
 
+// Who may see an agreement. Administrators: every agreement. Other users: agreements they sent, and,
+// once sent, agreements they are a recipient of (matched by their sign-in email).
+// Returns 'admin', 'owner', 'recipient' or null (no access).
+function docAccess(user, doc) {
+  if (user.role === 'admin') return 'admin';
+  if (doc.createdBy === user.id || sameEmail(doc.senderEmail, user.email)) return 'owner';
+  if (doc.status !== 'draft' && doc.signers.some((s) => sameEmail(s.email, user.email))) return 'recipient';
+  return null;
+}
+
+// Every /api/documents/:id/... request: someone without access gets "Not found" (the agreement's
+// existence isn't revealed). Recipients can view and download; only the sender or an administrator
+// can change an agreement.
+app.use('/api/documents/:id', requireUser, (req, res, next) => {
+  const doc = store.get(req.params.id);
+  if (!doc) return next();
+  const access = docAccess(req.user, doc);
+  if (!access) return res.status(404).json({ error: 'Not found' });
+  if (access === 'recipient' && req.method !== 'GET') return res.status(403).json({ error: 'Only the sender or an administrator can change this agreement.' });
+  next();
+});
+
 app.get('/api/documents', requireUser, (req, res) => {
   res.json(
-    store.all().map((d) => ({
+    store.all().map((d) => ({ d, access: docAccess(req.user, d) })).filter((x) => x.access).map(({ d, access }) => ({
       id: d.id, agreementId: d.agreementId, title: d.title, status: d.status, createdAt: d.createdAt, completedAt: d.completedAt,
+      senderName: d.senderName, access,
       signers: d.signers.map((s) => ({ name: s.name, email: s.email, status: s.status })),
     }))
   );
@@ -875,7 +901,9 @@ app.get('/api/documents/:id/print.pdf', requireUser, async (req, res) => {
   const doc = store.get(req.params.id);
   if (!doc?.finalFile) return res.status(404).json({ error: 'Only completed agreements can be printed.' });
   const tz = validTz(String(req.query.tz || 'UTC'));
-  const bytes = await reports.printCopyPdf(fs.readFileSync(filePath(doc.finalFile)), doc, { printedBy: req.actor, tz, verifyUrl: `${BASE_URL}/verify.html` });
+  // Protected agreements print from the server's plain copy, and the print copy is protected too.
+  const source = doc.plainFile && fs.existsSync(filePath(doc.plainFile)) ? doc.plainFile : doc.finalFile;
+  const bytes = await reports.printCopyPdf(fs.readFileSync(filePath(source)), doc, { printedBy: req.actor, tz, verifyUrl: `${BASE_URL}/verify.html`, protect: !!doc.protected });
   log(doc, `Print copy made by ${req.actor}`, req, 'download', `${auditStamp(now())} - IP address: ${clientIp(req)} - Every page stamped "PRINTED COPY"; the electronic original is unchanged`);
   store.save();
   res.setHeader('Content-Type', 'application/pdf');
@@ -1408,16 +1436,18 @@ async function buildFinalPdf(doc) {
       `No changes allowed except signing (DocMDP level 2). Any other change invalidates the certification. Certificate serial: ${certs.seal.serial}`);
   }
   log(doc, 'Agreement completed.', null, 'completed');
+  // The completed PDF is encrypted so it can be printed but its text can't be copied or edited.
+  log(doc, 'Document protected: printing allowed; copying text, editing and extracting pages not allowed', null, 'signed', 'Encryption: AES-128. Opens without a password; the permissions password is random and not kept.');
   try {
-    const bytes = await finalize({ ...doc, status: 'completed' }, original, COMPANY, { certs, attachments });
+    const out = await finalize({ ...doc, status: 'completed' }, original, COMPANY, { certs, attachments, protect: true });
     doc.locked = !!certs;
-    return bytes;
+    return out;
   } catch (e) {
     if (!certs) throw e;
     doc.locked = false;
     console.error('Digital signing failed:', e);
     log(doc, `Digital signatures could not be applied (${e.message}). The document was completed with electronic signatures only.`, null, 'failed');
-    return finalize({ ...doc, status: 'completed' }, original, COMPANY, { attachments });
+    return finalize({ ...doc, status: 'completed' }, original, COMPANY, { attachments, protect: true });
   }
 }
 
@@ -1613,12 +1643,16 @@ app.post('/api/sign/:token', async (req, res) => {
 
   if (doc.signers.every((s) => s.status === 'signed')) {
     doc.completedAt = now();
-    const bytes = await buildFinalPdf(doc);
+    const { bytes, plain } = await buildFinalPdf(doc);
     doc.status = 'completed';
     doc.finalFile = `${id(9)}-signed.pdf`;
     doc.finalHash = sha256(bytes);
+    doc.protected = true;
     fs.writeFileSync(filePath(doc.finalFile), bytes);
     fs.chmodSync(filePath(doc.finalFile), 0o444); // the signed original is never modified again
+    // Unencrypted copy, kept on the server only, for making stamped print copies.
+    doc.plainFile = `${id(9)}-plain.pdf`;
+    fs.writeFileSync(filePath(doc.plainFile), plain);
     store.save();
     const attachments = [{ filename: `${doc.title.replace(/[^\w.\- ]/g, '_')} - signed.pdf`, content: bytes }];
     for (const s of doc.signers) {
