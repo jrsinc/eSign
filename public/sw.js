@@ -1,8 +1,8 @@
 // Service worker for the installable app.
 // It only keeps the page design and an offline page. Agreements, PDFs and everything under /api/ always
 // come straight from the server and are never stored on the device.
-const CACHE = 'esign-shell-v1';
-const SHELL = ['/offline.html', '/style.css', '/logo.png', '/icons/icon-192.png', '/icons/favicon-32.png'];
+const CACHE = 'esign-shell-v2';
+const SHELL = ['/offline.html', '/offline.js', '/style.css', '/logo.png', '/icons/icon-192.png', '/icons/favicon-32.png'];
 
 self.addEventListener('install', (event) => {
   event.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting()));

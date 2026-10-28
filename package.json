@@ -1,8 +1,11 @@
 {
     "name": "company-esign",
     "version": "1.0.0",
-    "description": "",
+    "description": "JRS eSign: self-hosted electronic signature server",
     "main": "server.js",
+    "engines": {
+        "node": ">=20.12"
+    },
     "scripts": {
         "start": "node server.js"
     },

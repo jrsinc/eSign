@@ -12,12 +12,8 @@
     <h1>Can't reach the eSign server</h1>
     <p class="muted">Check your internet connection. If it's working, the eSign server may be switched off or restarting; contact your administrator.</p>
     <p class="small muted">No agreements are stored on this device, so nothing is lost.</p>
-    <button class="primary" onclick="location.reload()">Try again</button>
+    <button class="primary" id="retry">Try again</button>
   </main>
-  <script>
-    // Reconnect automatically when the network comes back.
-    window.addEventListener('online', () => location.reload());
-    setInterval(() => fetch('/', { method: 'HEAD', cache: 'no-store' }).then((r) => r.ok && location.reload()).catch(() => {}), 15000);
-  </script>
+  <script src="/offline.js"></script>
 </body>
 </html>

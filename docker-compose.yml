@@ -1,0 +1,42 @@
+# Production: the eSign server behind Caddy, which gets and renews the HTTPS certificate automatically.
+#   1. cp .env.example .env   and fill it in (BASE_URL, ESIGN_DOMAIN, ADMIN_PASSWORD, SMTP_*)
+#   2. docker compose up -d --build
+# Data and backups are kept in Docker volumes; see PRODUCTION.md for copying backups off the server.
+services:
+  esign:
+    build: .
+    image: jrs-esign:latest
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      NODE_ENV: production
+      DATA_DIR: /app/data
+      BACKUP_DIR: /app/backups
+      PORT: "3000"
+    volumes:
+      - esign-data:/app/data
+      - esign-backups:/app/backups
+    expose:
+      - "3000"
+
+  caddy:
+    image: caddy:2.8.4
+    restart: unless-stopped
+    depends_on:
+      - esign
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      ESIGN_DOMAIN: ${ESIGN_DOMAIN}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+
+volumes:
+  esign-data:
+  esign-backups:
+  caddy-data:
+  caddy-config:

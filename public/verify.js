@@ -1,0 +1,52 @@
+// Verify page: checks an uploaded signed PDF against our records and its embedded signatures.
+if ('serviceWorker' in navigator && window.isSecureContext) navigator.serviceWorker.register('/sw.js').catch(() => {});
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const drop = document.getElementById('drop'), input = document.getElementById('file'), out = document.getElementById('result');
+drop.onclick = () => input.click();
+input.onchange = () => input.files[0] && check(input.files[0]);
+drop.ondragover = (e) => { e.preventDefault(); drop.classList.add('over'); };
+drop.ondragleave = () => drop.classList.remove('over');
+drop.ondrop = (e) => { e.preventDefault(); drop.classList.remove('over'); e.dataTransfer.files[0] && check(e.dataTransfer.files[0]); };
+
+const mark = (ok) => ok ? '<span style="color:var(--ok)">✓</span>' : '<span style="color:var(--danger)">✗</span>';
+
+function signaturesHtml(e) {
+  if (!e || !e.signatures.length) return '<p class="small muted">No digital signatures are embedded in this PDF.</p>';
+  const all = e.signatures.every((s) => s.valid);
+  return `
+    <h3 style="margin-top:18px">Digital signatures in the file</h3>
+    ${e.certified ? `<p class="small">${mark(all && !e.modifiedAfterLastSignature)} <strong>Certified and locked</strong>: no changes allowed except signing${e.modifiedAfterLastSignature ? ' — <strong style="color:var(--danger)">but content was added after the last signature</strong>' : ''}.</p>` : ''}
+    <table>
+      <thead><tr><th>#</th><th>Signed by</th><th>Signed</th><th>Unchanged</th><th>Valid</th><th>Trusted</th></tr></thead>
+      <tbody>${e.signatures.map((s) => `
+        <tr>
+          <td>${s.index}</td>
+          <td><strong>${esc(s.name || 'Unknown')}</strong>${s.kind === 'certification' ? ' <span class="badge">certification</span>' : ''}<br>
+            <span class="small muted">${esc([s.email, s.organization, s.unit].filter(Boolean).join(' · '))}</span>
+            ${s.error ? `<br><span class="small" style="color:var(--danger)">${esc(s.error)}</span>` : ''}</td>
+          <td class="small">${s.signedAt ? new Date(s.signedAt).toLocaleString() : '—'}</td>
+          <td>${mark(s.intact)}</td><td>${mark(s.valid)}</td>
+          <td title="Issued by this system's root certificate">${mark(s.trusted)}</td>
+        </tr>`).join('')}</tbody>
+    </table>
+    <p class="small muted">Unchanged: the signed bytes match. Valid: the signature checks out with the signer's certificate. Trusted: the certificate was issued by this system's root certificate (<a href="/ca.cer">download</a> to trust it in Adobe).</p>`;
+}
+
+async function check(file) {
+  out.innerHTML = '<p class="muted">Checking…</p>';
+  const fd = new FormData(); fd.append('file', file);
+  const r = await (await fetch('/api/verify', { method: 'POST', body: fd })).json();
+  const sigsOk = r.embedded?.signatures?.length ? r.embedded.signatures.every((s) => s.valid) && !r.embedded.modifiedAfterLastSignature : null;
+  out.innerHTML = r.valid
+    ? `<div class="card" style="border-color:var(--ok)"><h2 style="color:var(--ok)">✓ Authentic and unmodified</h2>
+        <p><strong>${esc(r.title)}</strong><br><span class="small muted">${r.agreementId ? `Agreement ${esc(r.agreementId)} · ` : ''}completed ${new Date(r.completedAt).toLocaleString()}</span></p>
+        <ul>${r.signers.map((s) => `<li>${esc(s.name)} &lt;${esc(s.email)}&gt; signed ${new Date(s.signedAt).toLocaleString()}${s.reason ? ` — ${esc(s.reason)}` : ''}</li>`).join('')}</ul>
+        ${signaturesHtml(r.embedded)}
+        <p class="small muted" style="word-break:break-all">SHA-256 ${esc(r.hash)}</p></div>`
+    : `<div class="card" style="border-color:var(--danger)"><h2 style="color:var(--danger)">✗ Not verified</h2>
+        <p>${sigsOk === false
+          ? '<strong>This file has been altered after signing.</strong> The digital signatures below no longer match its content.'
+          : "This file doesn't match any document completed in this system. It may have been altered, or it wasn't signed here."}</p>
+        ${signaturesHtml(r.embedded)}
+        <p class="small muted" style="word-break:break-all">SHA-256 ${esc(r.hash || '')}</p></div>`;
+}

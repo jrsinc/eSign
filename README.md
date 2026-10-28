@@ -1,19 +1,21 @@
-# Company eSign
+# JRS eSign
 
-A self-hosted electronic signature system: upload a PDF, place signature fields, send it to signers, and get back a signed PDF with an audit certificate.
+A self-hosted electronic signature system: upload a PDF, place signature fields, send it to signers, and get back a digitally signed, locked PDF with an audit report.
+
+**Going live?** See [PRODUCTION.md](PRODUCTION.md): server, HTTPS, company email, moving your data, backups.
 
 ## Features
 
-- **Admin dashboard** (password protected): upload PDFs; add signers; drag and drop fields (signature, initials, date signed, full name, text, checkbox); send; void; send reminders; delete
-- **Signing order**: everyone at once, or one after another
-- **Signer page**: personal secure link (no account needed); draw or type a signature; guided "next field" navigation; consent checkbox; decline option
-- **Completed PDF**: values stamped onto the pages, an envelope ID footer on every page, and an appended **Certificate of Completion** (signers, emails, IPs, devices, timestamps, consent, full event history, SHA-256 of the original)
-- **Tamper check**: `/verify.html` lets anyone upload a signed PDF to confirm it matches the stored SHA-256 fingerprint
-- **Email** via any SMTP server (optional). Without SMTP, copy each signer's link from the dashboard.
+- **Personal accounts**: email + password + emailed one-time code. Administrators add users, set passwords and grant access (audit trail view/download, full administrator).
+- **Agreements**: upload or merge PDFs, organize pages, place 17 field types, copy and paste fields, numbered signing order, reminders. Sent agreements get an ID and can be cancelled, never deleted.
+- **Signer identity**: only the invited recipient can sign. Account holders sign in and re-enter their password; outside recipients get a one-time temporary password by email. Wrong passwords lock signing and notify the sender.
+- **Completed PDF**: values stamped onto the pages, a signature page per signer, an Adobe-style audit report, certificate-based digital signatures and a certification lock.
+- **Tamper check**: `/verify.html` checks a signed PDF against the records and its embedded signatures.
+- **Administration**: hash-chained system log, audit trail PDFs, print copies, company list, backup and restore.
 
-## Run it
+## Run it (testing on this PC)
 
-Requires Node.js 18 or newer.
+Requires Node.js 20.12 or newer.
 
 ```bash
 npm install
@@ -23,22 +25,23 @@ npm install
 npm start
 ```
 
-Open http://localhost:3000. The default password is `admin`.
+Open http://localhost:3000. On first visit, create the first administrator with the setup password (`ADMIN_PASSWORD`).
 
-## Configuration (environment variables)
+## Configuration
+
+Copy `.env.example` to `.env`, fill it in, and restart. Every setting is explained in that file. `.env` is git-ignored.
 
 | Variable | Purpose | Default |
 |---|---|---|
-| `ADMIN_PASSWORD` | Dashboard password. **Set this.** | `admin` |
-| `COMPANY_NAME` | Shown in the UI, emails and certificate | `Our Company` |
-| `BASE_URL` | Public URL used in signing links, e.g. `https://sign.yourcompany.com` | `http://localhost:3000` |
-| `PORT` | HTTP port | `3000` |
-| `DATA_DIR` | Where the database and PDFs are stored | `./data` |
-| `SMTP_HOST`, `SMTP_PORT`, `SMTP_SECURE`, `SMTP_USER`, `SMTP_PASS`, `MAIL_FROM` | Outgoing email (e.g. Gmail, Microsoft 365, SendGrid SMTP) | email off |
-
-| `NOTIFY_EMAIL` | Gets "X signed", "declined" and "completed" emails (with the signed PDF) | off |
-
-The easiest way is a `.env` file: copy `.env.example` to `.env`, fill it in, and restart. `.env` is git-ignored.
+| `ADMIN_PASSWORD` | Setup password for the first administrator. **Set this.** | `admin` |
+| `COMPANY_NAME`, `AGREEMENT_PREFIX` | Shown in the UI, emails and certificates; agreement numbers | `Our Company`, `AGR` |
+| `BASE_URL` | Public URL used in signing links, e.g. `https://esign.yourcompany.com` | `http://localhost:3000` |
+| `NODE_ENV` | `production` turns on start-up safety checks | |
+| `PORT`, `DATA_DIR`, `BACKUP_DIR` | Port, data folder, backups folder | `3000`, `./data`, `./backups` |
+| `AUTO_BACKUP_HOURS`, `BACKUP_KEEP` | Automatic backups | off, 14 |
+| `SMTP_HOST`, `SMTP_PORT`, `SMTP_SECURE`, `SMTP_USER`, `SMTP_PASS`, `MAIL_FROM` | Outgoing email | email off |
+| `NOTIFY_EMAIL` | Copy of "signed", "declined", "completed" and "signing locked" notices | off |
+| `SESSION_IDLE_MINUTES`, `TRUST_PROXY`, `PKI_COUNTRY` | Advanced | `30`, private networks, `US` |
 
 ### Email with Microsoft 365 (Outlook)
 
@@ -46,16 +49,13 @@ The easiest way is a `.env` file: copy `.env.example` to `.env`, fill it in, and
 2. In the **Microsoft 365 admin center** → Users → that user → **Mail** → *Manage email apps* → tick **Authenticated SMTP**. (Tenant-wide SMTP AUTH must not be disabled.)
 3. If the mailbox uses MFA, create an **app password** for it and use that as `SMTP_PASS`.
 4. In `.env`: `SMTP_HOST=smtp.office365.com`, `SMTP_PORT=587`, `SMTP_USER` and `MAIL_FROM` = that mailbox.
-5. Restart, then use **Send test email** on the dashboard.
+5. Restart, then add a test user with your own email: the welcome email confirms sending works.
 
 Gmail / Google Workspace: `SMTP_HOST=smtp.gmail.com`, `SMTP_PORT=587`, and an App Password.
 
-## Going live checklist
+## Going live
 
-1. Put it behind **HTTPS** (e.g. Caddy, Nginx, or IIS reverse proxy) and set `BASE_URL` to the https address.
-2. Set a strong `ADMIN_PASSWORD`.
-3. Configure SMTP so signers get emails automatically.
-4. **Back up the `data/` folder** regularly: it holds every document, signed copy and audit trail.
+Follow [PRODUCTION.md](PRODUCTION.md): Docker (`docker compose up -d --build`, HTTPS by Caddy), a Linux service (`deploy/esign.service`), or Windows Server. Ready-made files are in `deploy/`.
 
 ## Desktop and installable app
 
@@ -64,7 +64,7 @@ Both are windows onto the **same server and database**. Nothing about agreements
 ### Installable web app (no installer needed)
 
 1. Open the eSign address over **HTTPS** in Chrome or Edge (e.g. the ngrok or company address). Installing does not work over plain `http://` IP addresses.
-2. Click the **Install** icon (⊕) in the address bar, or menu ⋮ → *Apps* → *Install JRS LLC eSign*.
+2. Click the **Install** icon (⊕) in the address bar, or menu ⋮ → *Apps* → *Install JRS eSign*.
 3. It gets its own window, Start-menu and taskbar icon, desktop notifications, and an offline screen. Updates arrive automatically with the website.
 
 The service worker caches only the page design and the offline page, never agreements, PDFs or `/api/` data.
@@ -93,9 +93,13 @@ Signatures made this way are "simple electronic signatures", backed by an audit 
 ```
 server.js          API + routes
 lib/store.js       JSON-file database
-lib/finalize.js    Builds the signed PDF + certificate
+lib/finalize.js    Builds the signed PDF, signature pages and audit report
+lib/pdfsign.js, pki.js, verifysig.js   Digital signatures and their verification
+lib/audit.js       Hash-chained audit trail and system log
+lib/reports.js     Audit trail / system log PDFs and print copies
 lib/mailer.js      SMTP email
-public/            Dashboard (index.html, admin.js), signer page (sign.html, sign.js), verify.html
+public/            Dashboard (index.html, admin.js), signer page (sign.html, sign.js), verify page
 public/manifest.webmanifest, sw.js, offline.html, icons/   Installable web app
 desktop/           Windows desktop app (Electron)
+Dockerfile, docker-compose.yml, deploy/   Production setup (see PRODUCTION.md)
 ```

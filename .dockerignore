@@ -1,0 +1,11 @@
+# Never copy secrets, data or local builds into the image.
+.env
+.env.*
+!.env.example
+data/
+backups/
+*.esbackup
+node_modules/
+desktop/
+.git/
+.claude/

@@ -1,0 +1,14 @@
+# HTTPS in front of the eSign server. Caddy gets and renews the certificate automatically
+# (the domain's DNS must point at this server, and ports 80 and 443 must be open).
+# docker-compose sets ESIGN_DOMAIN from .env. Without Docker, replace {$ESIGN_DOMAIN} with your domain
+# and "esign:3000" with "127.0.0.1:3000".
+{$ESIGN_DOMAIN} {
+	encode zstd gzip
+
+	# Backups can be large when restoring; everything else is limited by the app itself.
+	request_body {
+		max_size 1GB
+	}
+
+	reverse_proxy esign:3000
+}

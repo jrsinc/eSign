@@ -32,16 +32,57 @@ const SENDER_EMAIL = process.env.NOTIFY_EMAIL || process.env.MAIL_FROM || '';
 // The app's own certificate authority for digital signatures (created on first run in data/pki).
 let CA = loadOrCreateCA(path.join(store.DATA_DIR, 'pki'), COMPANY);
 const AGREEMENT_PREFIX = String(process.env.AGREEMENT_PREFIX || 'AGR').replace(/[^A-Za-z0-9]/g, '').slice(0, 10) || 'AGR';
+const PRODUCTION = process.env.NODE_ENV === 'production';
 if (!process.env.ADMIN_PASSWORD) console.warn('WARNING: ADMIN_PASSWORD not set, using "admin". Set it before real use.');
 
+// In production, refuse to start with settings that would be unsafe for real agreements.
+if (PRODUCTION) {
+  const problems = [];
+  if (!process.env.ADMIN_PASSWORD || ADMIN_PASSWORD.length < 12 || /^(admin|change-me)/i.test(ADMIN_PASSWORD)) problems.push('ADMIN_PASSWORD must be set to a strong value (12+ characters, not the example).');
+  if (!/^https:\/\//.test(BASE_URL)) problems.push('BASE_URL must be the public https:// address, e.g. https://esign.yourcompany.com');
+  if (!process.env.SMTP_HOST) problems.push('Email must be configured (SMTP_HOST, SMTP_USER, SMTP_PASS, MAIL_FROM): signers receive their links and temporary passwords by email.');
+  if (problems.length) {
+    console.error(`Not starting: production settings need attention.\n- ${problems.join('\n- ')}`);
+    process.exit(1);
+  }
+}
+
 const app = express();
+app.disable('x-powered-by');
 // Express 4 does not catch rejected promises from async handlers; route them to the error handler.
 for (const m of ['get', 'post', 'put', 'delete']) {
   const orig = app[m].bind(app);
   app[m] = (route, ...handlers) =>
     orig(route, ...handlers.map((h) => (typeof h === 'function' && h.length < 4 ? (req, res, next) => Promise.resolve(h(req, res, next)).catch(next) : h)));
 }
-app.set('trust proxy', true);
+// Client IP addresses (recorded in audit trails) come from X-Forwarded-For only when the request
+// arrives through a proxy on this machine or private network (Caddy, Nginx, ngrok, Docker).
+// Set TRUST_PROXY to change this, e.g. a load balancer's address.
+app.set('trust proxy', process.env.TRUST_PROXY || 'loopback, linklocal, uniquelocal');
+
+// Security headers. Signing links carry a secret token, so no Referer leaves the site.
+app.use((req, res, next) => {
+  res.set({
+    'X-Content-Type-Options': 'nosniff',
+    'X-Frame-Options': 'DENY',
+    'Referrer-Policy': 'same-origin',
+    'Permissions-Policy': 'camera=(), microphone=(), geolocation=(), payment=()',
+    'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; worker-src 'self' blob:; connect-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'",
+  });
+  if (req.secure) res.set('Strict-Transport-Security', 'max-age=31536000');
+  next();
+});
+
+// For uptime monitors and Docker: is the server up and its data folder readable?
+app.get('/healthz', (req, res) => {
+  try {
+    fs.accessSync(store.DATA_DIR, fs.constants.R_OK | fs.constants.W_OK);
+    res.json({ ok: true, version: require('./package.json').version, email: mailer.enabled() });
+  } catch {
+    res.status(503).json({ ok: false });
+  }
+});
+
 app.use(express.json({ limit: '5mb' }));
 app.use(cookieParser());
 app.use(express.static(path.join(__dirname, 'public')));
@@ -1643,7 +1684,39 @@ for (const d of [...store.all()].filter((d) => d.status !== 'draft' && !d.agreem
 }
 store.save();
 
-app.listen(PORT, () => {
-  console.log(`${COMPANY} eSign running at ${BASE_URL}  (email ${mailer.enabled() ? 'ON' : 'OFF - links print here'})`);
+// Automatic backups: AUTO_BACKUP_HOURS=24 writes a backup to the backups folder once a day and keeps
+// the newest BACKUP_KEEP (default 14). Copy that folder somewhere off this server too.
+const AUTO_BACKUP_HOURS = Number(process.env.AUTO_BACKUP_HOURS || 0);
+const BACKUP_KEEP = Math.max(1, Number(process.env.BACKUP_KEEP || 14));
+function autoBackup() {
+  try {
+    fs.mkdirSync(BACKUP_DIR, { recursive: true });
+    const name = `auto-${backupName()}`;
+    fs.writeFileSync(path.join(BACKUP_DIR, name), makeBackup('Automatic backup'));
+    const autos = fs.readdirSync(BACKUP_DIR).filter((f) => f.startsWith('auto-') && f.endsWith('.esbackup')).sort();
+    for (const old of autos.slice(0, Math.max(0, autos.length - BACKUP_KEEP))) fs.unlinkSync(path.join(BACKUP_DIR, old));
+    sysLog(null, 'backup', `Automatic backup saved: ${name}`);
+  } catch (e) {
+    console.error('Automatic backup failed:', e);
+    sysLog(null, 'backup', `Automatic backup FAILED: ${e.message}`);
+  }
+}
+
+const server = app.listen(PORT, () => {
+  console.log(`${COMPANY} eSign running at ${BASE_URL}  (email ${mailer.enabled() ? 'ON' : 'OFF - links print here'}${PRODUCTION ? ', production' : ''})`);
   setTimeout(() => sendDueReminders().catch((e) => console.error('Reminder error:', e)), 60 * 1000);
+  if (AUTO_BACKUP_HOURS > 0) {
+    setTimeout(autoBackup, Math.min(5 * 60 * 1000, AUTO_BACKUP_HOURS * 3600 * 1000));
+    setInterval(autoBackup, AUTO_BACKUP_HOURS * 3600 * 1000);
+    console.log(`Automatic backups every ${AUTO_BACKUP_HOURS} h to ${BACKUP_DIR} (keeping ${BACKUP_KEEP})`);
+  }
 });
+
+// Stop cleanly when the service manager or Docker asks (data is written synchronously, so nothing is lost).
+for (const signal of ['SIGTERM', 'SIGINT']) {
+  process.on(signal, () => {
+    console.log(`${signal} received, shutting down`);
+    server.close(() => process.exit(0));
+    setTimeout(() => process.exit(0), 5000).unref();
+  });
+}

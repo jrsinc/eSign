@@ -1,0 +1,28 @@
+# systemd service for Linux without Docker. Assumes the app is in /opt/esign, run by user "esign".
+#   sudo cp deploy/esign.service /etc/systemd/system/
+#   sudo systemctl enable --now esign
+#   journalctl -u esign -f        (logs)
+[Unit]
+Description=JRS eSign
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=esign
+Group=esign
+WorkingDirectory=/opt/esign
+# Settings come from /opt/esign/.env (read by the server itself).
+Environment=NODE_ENV=production
+ExecStart=/usr/bin/node server.js
+Restart=always
+RestartSec=5
+
+# Hardening: the app can write only to its data and backups folders.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/esign/data /opt/esign/backups
+
+[Install]
+WantedBy=multi-user.target
