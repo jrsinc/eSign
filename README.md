@@ -1,4 +1,4 @@
-# Method365
+# Method 365
 
 Electronic signatures for JRS.
 
@@ -29,6 +29,16 @@ npm start
 ```
 
 Open http://localhost:3000. On first visit, create the first administrator with the setup password (`ADMIN_PASSWORD`).
+
+## Tests and CI/CD
+
+```bash
+npm test
+```
+
+Runs every suite in `test/` against its own temporary server (email off, no `.env`). `npm test -- identity` runs one suite.
+GitHub Actions runs the tests and a Docker build on every push, and deploys `main` to production automatically
+when the server is set up for it (see [PRODUCTION.md](PRODUCTION.md), section 3a).
 
 ## Configuration
 
@@ -65,7 +75,7 @@ Both are windows onto the **same server and database**. Nothing about agreements
 ### Installable web app (no installer needed)
 
 1. Open the eSign address over **HTTPS** in Chrome or Edge (e.g. the ngrok or company address). Installing does not work over plain `http://` IP addresses.
-2. Click the **Install** icon (⊕) in the address bar, or menu ⋮ → *Apps* → *Install Method365*.
+2. Click the **Install** icon (⊕) in the address bar, or menu ⋮ → *Apps* → *Install Method 365*.
 3. It gets its own window, Start-menu and taskbar icon, desktop notifications, and an offline screen. Updates arrive automatically with the website.
 
 The service worker caches only the page design and the offline page, never agreements, PDFs or `/api/` data.

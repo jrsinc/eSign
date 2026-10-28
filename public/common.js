@@ -140,20 +140,6 @@ const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '
 const when = (iso) => (iso ? new Date(iso).toLocaleString() : '—');
 const $ = (sel, root = document) => root.querySelector(sel);
 
-// Shows the company logo (public/logo.png) in the header when it exists.
-function showLogo() {
-  const img = new Image();
-  img.onload = () => {
-    const logo = $('.logo');
-    if (!logo) return;
-    img.alt = 'Logo';
-    img.style.height = '32px';
-    logo.querySelector('svg')?.replaceWith(img);
-  };
-  img.src = '/logo.png';
-}
-showLogo();
-
 // Installable app: the service worker only caches the page design and the offline page.
 if ('serviceWorker' in navigator && window.isSecureContext) {
   navigator.serviceWorker.register('/sw.js').catch((e) => console.warn('Service worker not registered:', e.message));

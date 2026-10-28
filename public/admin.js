@@ -16,7 +16,7 @@ async function boot() {
   try {
     me = await api('/api/me');
     if (nextUrl) return location.replace(nextUrl);
-    $('#company').textContent = me.app;
+    $('#company').textContent = me.companyFull || me.company;
     document.title = `${me.app} – ${me.company}`;
     $('#nav').classList.remove('hidden');
     $('#logout').classList.remove('hidden');
@@ -48,11 +48,12 @@ async function showLogin(notice = '') {
   actions.innerHTML = '';
   ['#nav', '#logout', '#account'].forEach((s) => $(s).classList.add('hidden'));
   const status = await api('/api/auth/status');
+  $('#company').textContent = status.companyFull || status.company;
   if (status.setupRequired) return showSetup(status);
   app.innerHTML = `
     <div class="center-box card">
       <h1>Sign in</h1>
-      <p class="muted">${esc(status.app)} for ${esc(status.company)}. Use your own email address and password.</p>
+      <p class="muted">${esc(status.app)} for ${esc(status.companyFull || status.company)}. Use your own email address and password.</p>
       ${nextUrl ? '<p class="small identity">Sign in with the email the document was sent to. You\'ll go straight back to the document.</p>' : ''}
       ${notice ? `<p class="small" style="color:var(--warn)">${esc(notice)}</p>` : ''}
       <form id="loginForm">

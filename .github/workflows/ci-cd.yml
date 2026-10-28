@@ -1,0 +1,127 @@
+# CI/CD for Method 365.
+#   Every push and pull request: syntax check + all tests, then build and start the Docker image.
+#   Push to main (after both pass): deploy that exact commit to the production server over SSH.
+# Deployment is skipped (with a notice) until the production secrets are set; see PRODUCTION.md,
+# section "Automatic deployment".
+name: CI/CD
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - name: Syntax check
+        run: npm run check
+      - name: Tests (each suite on its own server, email off)
+        run: npm test
+
+  docker:
+    name: Docker image
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: docker build -t method365:ci .
+      - name: Start in production mode and wait until healthy
+        run: |
+          docker run -d --name method365-ci -p 3000:3000 \
+            -e ADMIN_PASSWORD=ci-only-setup-password-123 \
+            -e BASE_URL=https://ci.example.test \
+            -e SMTP_HOST=127.0.0.1 -e SMTP_PORT=2525 -e SMTP_USER=ci@example.test -e SMTP_PASS=unused -e MAIL_FROM=ci@example.test \
+            method365:ci
+          for i in $(seq 1 30); do
+            status=$(docker inspect -f '{{.State.Health.Status}}' method365-ci)
+            echo "health: $status"
+            [ "$status" = healthy ] && break
+            [ "$(docker inspect -f '{{.State.Running}}' method365-ci)" = true ] || break
+            sleep 3
+          done
+          docker logs method365-ci
+          test "$(docker inspect -f '{{.State.Health.Status}}' method365-ci)" = healthy
+          curl -fsS http://127.0.0.1:3000/healthz
+          # Security headers are present.
+          curl -fsSI http://127.0.0.1:3000/ | grep -i '^content-security-policy:'
+
+  deploy:
+    name: Deploy to production
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: [test, docker]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    # "production" environment: add required reviewers in GitHub to approve each deployment by hand.
+    environment:
+      name: production
+      url: ${{ vars.PRODUCTION_URL }}
+    concurrency:
+      group: production
+      cancel-in-progress: false
+    env:
+      SSH_HOST: ${{ secrets.PROD_SSH_HOST }}
+      SSH_USER: ${{ secrets.PROD_SSH_USER }}
+      SSH_PORT: ${{ secrets.PROD_SSH_PORT || '22' }}
+      APP_PATH: ${{ secrets.PROD_APP_PATH || '/opt/esign' }}
+      PRODUCTION_URL: ${{ vars.PRODUCTION_URL }}
+      HAS_KEY: ${{ secrets.PROD_SSH_KEY != '' }}
+      HAS_KNOWN_HOSTS: ${{ secrets.PROD_SSH_KNOWN_HOSTS != '' }}
+    steps:
+      - name: Check deployment settings
+        id: settings
+        run: |
+          if [ -n "$SSH_HOST" ] && [ -n "$SSH_USER" ] && [ "$HAS_KEY" = true ] && [ "$HAS_KNOWN_HOSTS" = true ]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::Deployment skipped: set PROD_SSH_HOST, PROD_SSH_USER, PROD_SSH_KEY and PROD_SSH_KNOWN_HOSTS in the production environment (see PRODUCTION.md)."
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up SSH
+        if: steps.settings.outputs.ready == 'true'
+        env:
+          SSH_KEY: ${{ secrets.PROD_SSH_KEY }}
+          KNOWN_HOSTS: ${{ secrets.PROD_SSH_KNOWN_HOSTS }}
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          # The server's host key is pinned, so the deployment can't be redirected to another machine.
+          printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 644 ~/.ssh/known_hosts
+
+      # Runs deploy/deploy.sh from the commit being deployed, inside the app folder on the server.
+      - name: Deploy ${{ github.sha }}
+        if: steps.settings.outputs.ready == 'true'
+        run: |
+          ssh -i ~/.ssh/deploy_key -p "$SSH_PORT" -o StrictHostKeyChecking=yes -o BatchMode=yes "$SSH_USER@$SSH_HOST" \
+            "cd '$APP_PATH' && git fetch --quiet origin && git show '${{ github.sha }}:deploy/deploy.sh' > /tmp/method365-deploy.sh && sh /tmp/method365-deploy.sh '${{ github.sha }}'"
+
+      - name: Check the live site
+        if: steps.settings.outputs.ready == 'true' && env.PRODUCTION_URL != ''
+        run: |
+          for i in $(seq 1 20); do
+            if curl -fsS "$PRODUCTION_URL/healthz"; then echo; echo "Live and healthy"; exit 0; fi
+            sleep 3
+          done
+          echo "::error::$PRODUCTION_URL/healthz did not answer after deploying"
+          exit 1
+
+      - name: Remove the SSH key
+        if: always()
+        run: rm -f ~/.ssh/deploy_key

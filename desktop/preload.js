@@ -1,5 +1,5 @@
 // Bridge for the app's own local pages (settings and offline screen) only.
-// The remote Method365 website never gets this bridge, so it cannot change the app's settings.
+// The remote Method 365 website never gets this bridge, so it cannot change the app's settings.
 const { contextBridge, ipcRenderer } = require('electron');
 
 if (location.protocol === 'file:') {

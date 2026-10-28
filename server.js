@@ -27,7 +27,7 @@ const { inspectSignatures } = require('./lib/verifysig');
 const PORT = Number(process.env.PORT || 3000);
 const BASE_URL = (process.env.BASE_URL || `http://localhost:${PORT}`).replace(/\/$/, '');
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'admin';
-const { COMPANY, APP_NAME } = require('./lib/brand');
+const { COMPANY, COMPANY_SHORT, COMPANY_FULL, APP_NAME } = require('./lib/brand');
 // The system's own address: used in the company seal certificate that certifies completed agreements.
 const SENDER_EMAIL = process.env.MAIL_FROM || process.env.SMTP_USER || process.env.NOTIFY_EMAIL || '';
 // The app's own certificate authority for digital signatures (created on first run in data/pki).
@@ -197,9 +197,9 @@ async function sendOtp(user, challengeId, req) {
 const POLICY_VERSION = '1.0';
 const POLICY_EFFECTIVE = '28-Oct-2026';
 const SUPPORT_EMAIL = process.env.SUPPORT_EMAIL || process.env.MAIL_FROM || process.env.SMTP_USER || '';
-app.get('/api/policy-info', (req, res) => res.json({ app: APP_NAME, company: COMPANY, contact: SUPPORT_EMAIL, version: POLICY_VERSION, effective: POLICY_EFFECTIVE, baseUrl: BASE_URL }));
+app.get('/api/policy-info', (req, res) => res.json({ app: APP_NAME, company: COMPANY, companyFull: COMPANY_FULL, contact: SUPPORT_EMAIL, version: POLICY_VERSION, effective: POLICY_EFFECTIVE, baseUrl: BASE_URL }));
 
-app.get('/api/auth/status', (req, res) => res.json({ company: COMPANY, app: APP_NAME, setupRequired: store.users().length === 0, mail: mailer.enabled() }));
+app.get('/api/auth/status', (req, res) => res.json({ company: COMPANY, companyFull: COMPANY_FULL, app: APP_NAME, setupRequired: store.users().length === 0, mail: mailer.enabled() }));
 
 // First-time setup: the .env ADMIN_PASSWORD proves ownership once, to create the first administrator.
 app.post('/api/auth/setup', (req, res) => {
@@ -319,7 +319,7 @@ app.post('/api/logout', (req, res) => {
 });
 
 app.get('/api/me', requireUser, (req, res) =>
-  res.json({ company: COMPANY, app: APP_NAME, mail: mailer.enabled(), notify: process.env.NOTIFY_EMAIL || '', dateFormats: DATE_FORMATS, reasons: REASONS, user: publicUser(req.user), idleMinutes: IDLE_MINUTES }));
+  res.json({ company: COMPANY, companyFull: COMPANY_FULL, app: APP_NAME, mail: mailer.enabled(), notify: process.env.NOTIFY_EMAIL || '', dateFormats: DATE_FORMATS, reasons: REASONS, user: publicUser(req.user), idleMinutes: IDLE_MINUTES }));
 
 // ---------- Passwords ----------
 // Only administrators set passwords. A password an administrator sets or generates is shown to that
@@ -528,7 +528,7 @@ function makeBackup(createdBy) {
   return require('zlib').gzipSync(JSON.stringify(body));
 }
 const backupCounts = (db) => ({ agreements: (db.documents || []).length, users: (db.users || []).length, companies: (db.companies || []).length });
-const backupName = (at = new Date()) => `${COMPANY.replace(/[^\w-]/g, '_')}-${APP_NAME.replace(/[^\w-]/g, '_')}-backup-${at.toISOString().slice(0, 19).replace(/[T:]/g, '-')}.esbackup`;
+const backupName = (at = new Date()) => `${COMPANY_SHORT.replace(/[^\w-]/g, '_')}-${APP_NAME.replace(/[^\w-]/g, '_')}-backup-${at.toISOString().slice(0, 19).replace(/[T:]/g, '-')}.esbackup`;
 
 // Reads and checks an uploaded backup; throws a readable error if it isn't a complete, unchanged backup.
 function readBackup(buf) {
@@ -1224,7 +1224,7 @@ function identityBlocked(req, res, doc, signer) {
     log(doc, `Access refused: signing link for ${who(signer)} opened while signed in as ${idn.loggedInAs}`, req, 'failed');
     store.save();
   }
-  res.status(403).json({ error, identity: { reason: idn.reason, invitedEmail: signer.email, loggedInAs: idn.loggedInAs }, company: COMPANY, app: APP_NAME, title: doc.title, agreementId: doc.agreementId });
+  res.status(403).json({ error, identity: { reason: idn.reason, invitedEmail: signer.email, loggedInAs: idn.loggedInAs }, company: COMPANY, companyFull: COMPANY_FULL, app: APP_NAME, title: doc.title, agreementId: doc.agreementId });
   return null;
 }
 
@@ -1293,7 +1293,7 @@ app.get('/api/sign/:token', async (req, res) => {
   const { doc, signer } = ctx;
   if (signer.status === 'signed') {
     return res.json({
-      company: COMPANY, app: APP_NAME, title: doc.title, agreementId: doc.agreementId, status: doc.status, expired: true,
+      company: COMPANY, companyFull: COMPANY_FULL, app: APP_NAME, title: doc.title, agreementId: doc.agreementId, status: doc.status, expired: true,
       signer: { name: signer.name, status: 'signed', signedAt: signer.signedAt },
       // After signing without an account, the person may ask for one.
       canRequestAccount: !store.getUserByEmail(signer.email) && !signer.accountRequestedAt,
@@ -1322,6 +1322,7 @@ app.get('/api/sign/:token', async (req, res) => {
   }
   res.json({
     company: COMPANY,
+    companyFull: COMPANY_FULL,
     app: APP_NAME,
     companies: companyNames(),
     title: doc.title,

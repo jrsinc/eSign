@@ -1,4 +1,4 @@
-# Going live: Method365 in production
+# Going live: Method 365 in production
 
 Today the app runs on one PC and reaches the internet through ngrok. That works for testing, but it
 stops whenever the PC sleeps, restarts or the session ends. For real agreements, run it on a server
@@ -43,11 +43,64 @@ docker compose up -d --build
 - Logs: `docker compose logs -f esign`
 - Data lives in the Docker volumes `esign-data` and `esign-backups`, and survives updates and restarts.
 
-**Update to a new version:**
+**Updates** happen automatically when new code is pushed to `main` (section 3a). To update by hand:
 
 ```bash
-cd /opt/esign && git pull && docker compose up -d --build
+cd /opt/esign && git fetch && sh deploy/deploy.sh origin/main
 ```
+
+## 3a. Automatic deployment (CI/CD)
+
+`.github/workflows/ci-cd.yml` runs on GitHub Actions:
+
+| When | What runs |
+|---|---|
+| Every push and pull request | Syntax check and all tests (`npm test`), then the Docker image is built, started in production mode and checked for health |
+| Push to `main`, after both pass | **Deploy**: connects to the server over SSH and runs `deploy/deploy.sh` for that exact commit |
+
+`deploy/deploy.sh` on the server:
+1. backs up the data folder to `predeploy-backups/`, keeping the newest 10
+2. switches to the new commit, rebuilds and restarts
+3. waits until the app reports healthy
+4. **rolls back** to the previous version automatically if it doesn't
+
+Afterwards the pipeline checks `PRODUCTION_URL/healthz` from outside. Until the settings below exist, the
+deploy step is skipped with a notice and the tests still run.
+
+**One-time setup** (after section 3, with the app in `/opt/esign`):
+
+1. **Server user for deployments**, allowed to run Docker:
+   ```bash
+   sudo usermod -aG docker deploy      # or the user that owns /opt/esign
+   ```
+2. **Key for GitHub Actions to log in.** On your own PC:
+   ```bash
+   ssh-keygen -t ed25519 -f method365-actions -N "" -C "github-actions"
+   ```
+   Add the contents of `method365-actions.pub` to `~/.ssh/authorized_keys` of the deploy user on the server.
+3. **The server's host key.** On your PC: `ssh-keyscan -H <server>`, and check the fingerprint matches the
+   server (`ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` on the server).
+4. **If the GitHub repository is private**, let the server pull it: on the server
+   `ssh-keygen -t ed25519 -f ~/.ssh/github_deploy`, add the `.pub` under GitHub → repository → **Settings → Deploy keys**
+   (read-only), and use `git@github.com:jrsinc/eSign.git` as the remote.
+5. In GitHub → repository → **Settings → Environments → New environment** named `production`:
+
+   | Secret | Value |
+   |---|---|
+   | `PROD_SSH_HOST` | server address, e.g. `esign.method365sign.com` |
+   | `PROD_SSH_USER` | the deploy user |
+   | `PROD_SSH_KEY` | the whole private key file `method365-actions` |
+   | `PROD_SSH_KNOWN_HOSTS` | the output of step 3 |
+   | `PROD_SSH_PORT` | optional, default 22 |
+   | `PROD_APP_PATH` | optional, default `/opt/esign` |
+
+   Variable `PRODUCTION_URL`: `https://esign.method365sign.com`.
+   Optional: add **Required reviewers** so every deployment waits for an approval click.
+6. Recommended: GitHub → **Settings → Branches** → protect `main`, require pull requests and the **Tests** and
+   **Docker image** checks to pass, so untested code never reaches production.
+
+**Going back to an older version:** run the **CI/CD** workflow from an older commit, or on the server
+`sh deploy/deploy.sh <commit>`. Data from before an update is in `predeploy-backups/` (a `.tgz` of the data folder).
 
 ## 4. Option B: Linux without Docker
 
@@ -146,4 +199,4 @@ production start-up checks above.
 | Status | `docker compose ps` | `systemctl status esign` |
 | Logs | `docker compose logs -f esign` | `journalctl -u esign -f` |
 | Restart (after editing `.env`) | `docker compose up -d` | `sudo systemctl restart esign` |
-| Update | `git pull && docker compose up -d --build` | `git pull && npm ci --omit=dev && sudo systemctl restart esign` |
+| Update | automatic on push to `main` (section 3a), or `git fetch && sh deploy/deploy.sh origin/main` | `git pull && npm ci --omit=dev && sudo systemctl restart esign` |

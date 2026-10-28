@@ -1,8 +1,8 @@
 {
   "name": "jrs-esign-desktop",
-  "productName": "Method365",
+  "productName": "Method 365",
   "version": "1.0.0",
-  "description": "Desktop app for the JRS e-signature system. It opens the shared Method365 server in its own window; all data stays on the server.",
+  "description": "Desktop app for the JRS e-signature system. It opens the shared Method 365 server in its own window; all data stays on the server.",
   "main": "main.js",
   "private": true,
   "scripts": {
@@ -16,7 +16,7 @@
   },
   "build": {
     "appId": "com.jrsllc.esign",
-    "productName": "Method365",
+    "productName": "Method 365",
     "directories": { "output": "dist", "buildResources": "build" },
     "files": ["main.js", "preload.js", "offline.html", "settings.html", "config.json", "build/icon.png", "build/tray.png"],
     "win": { "target": "nsis", "icon": "build/icon.png" },
@@ -26,7 +26,7 @@
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "shortcutName": "Method365"
+      "shortcutName": "Method 365"
     }
   }
 }

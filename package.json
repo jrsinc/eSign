@@ -7,7 +7,9 @@
         "node": ">=20.12"
     },
     "scripts": {
-        "start": "node server.js"
+        "start": "node server.js",
+        "check": "node -e \"for (const f of ['server.js', ...require('fs').readdirSync('lib').map(f => 'lib/' + f), ...require('fs').readdirSync('public').filter(f => f.endsWith('.js')).map(f => 'public/' + f)]) require('child_process').execFileSync(process.execPath, ['--check', f], { stdio: 'inherit' }); console.log('syntax ok')\"",
+        "test": "node test/run.js"
     },
     "keywords": [],
     "author": "",

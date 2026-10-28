@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024" role="img" aria-label="Method 365">
+  <!-- Method 365 mark: nib-M, ivory on deep ink (from method365-logo.svg) -->
+  <rect x="0" y="0" width="1024" height="1024" rx="228" fill="#1B2350"/>
+  <path fill="#F5F2EA" stroke="#F5F2EA" stroke-width="16" stroke-linejoin="round" fill-rule="evenodd"
+    d="M232 752 L232 320 L296 272 L360 272 L512 488 L664 272 L728 272 L792 320 L792 752 L672 752 L672 470 L512 752 L352 470 L352 752 Z
+       M494 654.8 A52 52 0 1 1 530 654.8 L512 752 Z"/>
+  <path fill="#C2A26A" d="M392 800 C 470 788, 560 788, 632 796 C 560 806, 470 806, 392 800 Z"/>
+</svg>

@@ -28,7 +28,7 @@ const signInUrl = (email) => `/?next=${encodeURIComponent(location.pathname + lo
 // The server refused because this browser is not signed in as the invited recipient.
 function identityPage(d) {
   const { reason, invitedEmail, loggedInAs } = d.identity;
-  $('#company').textContent = d.app || 'Method365';
+  $('#company').textContent = d.companyFull || d.company || '';
   const doc = `${d.agreementId ? `Agreement <strong>${esc(d.agreementId)}</strong> ` : 'The document '}"${esc(d.title || '')}"`;
   if (reason === 'login') {
     message('Sign in to continue', `
@@ -58,7 +58,7 @@ async function load() {
     if (e.data?.identity) return identityPage(e.data);
     return message('Link not valid', `<p class="muted">${esc(e.message)} Please contact the sender.</p>`);
   }
-  $('#company').textContent = info.app || info.company;
+  $('#company').textContent = info.companyFull || info.company;
   document.title = `Sign: ${info.title}`;
 
   // Links stop working once their owner has signed.

@@ -19,6 +19,10 @@ header.top .logo { font-weight: 700; font-size: 16px; display: flex; align-items
 header.top .logo svg { color: var(--brand); }
 header.top .spacer { flex: 1; }
 header.top .logo span { white-space: nowrap; }
+.brand-logo { height: 40px; width: auto; display: block; }
+.brand-company { font-size: 13px; font-weight: 600; color: var(--muted); padding-left: 12px; border-left: 1px solid var(--line); line-height: 1.2; }
+.brand-company:empty { display: none; }
+@media (max-width: 640px) { .brand-logo { height: 32px; } .brand-company { display: none; } }
 .menu { position: relative; }
 .menu > summary { list-style: none; }
 .menu > summary::-webkit-details-marker { display: none; }
