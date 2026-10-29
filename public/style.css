@@ -19,6 +19,9 @@ header.top .logo { font-weight: 700; font-size: 16px; display: flex; align-items
 header.top .logo svg { color: var(--brand); }
 header.top .spacer { flex: 1; }
 header.top .logo span { white-space: nowrap; }
+.list-tools select, .time-range input { width: auto; min-width: 170px; }
+.profile-pad { width: 100%; max-width: 520px; height: 160px; border: 1px dashed #9ca3af; border-radius: 8px; background: #fff; touch-action: none; cursor: crosshair; display: block; }
+.profile-sig { max-height: 90px; max-width: 100%; display: block; }
 .brand-logo { height: 40px; width: auto; display: block; }
 .brand-company { font-size: 13px; font-weight: 600; color: var(--muted); padding-left: 12px; border-left: 1px solid var(--line); line-height: 1.2; }
 .brand-company:empty { display: none; }

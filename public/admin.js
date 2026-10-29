@@ -21,9 +21,10 @@ async function boot() {
     $('#nav').classList.remove('hidden');
     $('#logout').classList.remove('hidden');
     $('#adminMenu').classList.toggle('hidden', me.user.role !== 'admin');
+    refreshTicketCount();
     $('#account').classList.remove('hidden');
     $('#account').textContent = `👤 ${me.user.name}`;
-    $('#account').title = `${me.user.email} · ${me.user.role === 'admin' ? 'Administrator · click to change your password' : 'Sender'}`;
+    $('#account').title = `${me.user.email} · ${me.user.role === 'admin' ? 'Administrator' : 'Sender'} · click for your profile`;
     route();
     if (!watcher) {
       watchAgreements();
@@ -64,13 +65,19 @@ async function showLogin(notice = '') {
         <p id="loginErr" class="small" style="color:var(--danger)"></p>
         <button class="primary" style="width:100%">Continue</button>
       </form>
-      <p class="small muted" style="margin-top:14px">Two-step sign-in: after your password, we email you a one-time code.<br>Forgot your password or locked out? Ask your administrator.</p>
+      <p class="small muted" style="margin-top:14px">Two-step sign-in: after your password, we email you a one-time code.<br>Forgot your password or locked out? <a href="#" id="helpPassword">Ask an administrator for help</a></p>
       <p class="small muted" style="margin:10px 0 0;text-align:center"><a href="/policy.html" target="_blank" rel="noopener">Policies and privacy</a></p>
     </div>`;
   if (nextUrl && params.get('email')) {
     $('#email').value = params.get('email');
     $('#pw').focus();
   }
+  $('#helpPassword').onclick = (e) => {
+    e.preventDefault();
+    const email = $('#email').value.trim();
+    if (!email) { toast('Type your email address first, then click again.', 4000); return $('#email').focus(); }
+    raiseHelpTicket({ kind: 'password', email });
+  };
   $('#loginForm').onsubmit = async (e) => {
     e.preventDefault();
     const btn = $('#loginForm button.primary');
@@ -101,8 +108,9 @@ function showCodeStep({ challenge, sentTo, minutes }) {
         <a href="#" id="back" class="small">← Use a different account</a>
         <a href="#" id="resend" class="small">Send a new code</a>
       </div>
-      <p class="small muted" style="margin-top:12px">Can't find it? Check your junk / spam folder.</p>
+      <p class="small muted" style="margin-top:12px">Can't find it? Check your junk / spam folder. Still not there? <a href="#" id="helpCode">Report a problem</a></p>
     </div>`;
+  $('#helpCode').onclick = (e) => { e.preventDefault(); raiseHelpTicket({ kind: 'code', challenge }); };
   $('#back').onclick = (e) => { e.preventDefault(); showLogin(); };
   $('#resend').onclick = async (e) => {
     e.preventDefault();
@@ -124,6 +132,40 @@ function showCodeStep({ challenge, sentTo, minutes }) {
       if (err.restart) return showLogin(err.message);
       $('#codeErr').textContent = err.message;
       $('#code').select();
+    }
+  };
+}
+
+// Sign-in trouble: raises a support ticket for the administrators and shows its case number.
+function raiseHelpTicket({ kind, challenge, email }) {
+  const what = kind === 'code' ? 'Your sign-in code did not arrive.' : 'You forgot your password or your account is locked.';
+  const bg = document.createElement('div');
+  bg.className = 'modal-bg';
+  bg.innerHTML = `
+    <div class="modal" style="max-width:440px">
+      <h2>Report a problem</h2>
+      <p class="small muted">${what} We'll open a support case and tell the administrators, who can check your account and fix it.</p>
+      <label for="tkMsg">Anything to add? (optional)</label>
+      <textarea id="tkMsg" rows="3" maxlength="1000" placeholder="e.g. I changed my email address last week"></textarea>
+      <div class="row end" style="margin-top:12px"><button id="tkCancel">Cancel</button><button id="tkSend" class="primary">Open a support case</button></div>
+    </div>`;
+  document.body.append(bg);
+  $('#tkMsg').focus();
+  $('#tkCancel').onclick = () => bg.remove();
+  $('#tkSend').onclick = async () => {
+    $('#tkSend').disabled = true;
+    try {
+      const t = await api('/api/support/sign-in-help', { method: 'POST', body: { kind, challenge, email, message: $('#tkMsg').value } });
+      bg.querySelector('.modal').innerHTML = `
+        <h2>Support case opened</h2>
+        <p>Your case number is</p>
+        <p style="font-size:22px;font-weight:700;letter-spacing:.03em;margin:4px 0 12px">${esc(t.caseNo)}</p>
+        <p class="small muted">${esc(t.kind)}. The administrators have been told and will fix it. Quote this number if you contact them. You'll get an email when it is resolved.</p>
+        <div class="row end"><button id="tkDone" class="primary">OK</button></div>`;
+      $('#tkDone').onclick = () => bg.remove();
+    } catch (err) {
+      $('#tkSend').disabled = false;
+      toast(err.message, 5000);
     }
   };
 }
@@ -163,9 +205,10 @@ $('#logout').onclick = async () => {
   location.reload();
 };
 
-$('#account').onclick = () => {
-  // Only administrators manage passwords, including their own.
-  if (me.user.role !== 'admin') return toast('To change your password, please ask your administrator.', 4000);
+$('#account').onclick = () => { location.hash = '#/profile'; };
+
+// Administrators change their own password from their profile; other users ask an administrator.
+function changeOwnPassword() {
   const bg = document.createElement('div');
   bg.className = 'modal-bg';
   bg.innerHTML = `
@@ -189,7 +232,7 @@ $('#account').onclick = () => {
       toast('Password changed');
     } catch (e) { toast(e.message, 4000); }
   };
-};
+}
 
 window.addEventListener('hashchange', () => me && route());
 // The Admin menu closes after choosing a page or clicking elsewhere.
@@ -207,7 +250,179 @@ function route() {
   else if (location.hash === '#/users' && me.user.role === 'admin') showUsers();
   else if (location.hash === '#/companies' && me.user.role === 'admin') showCompanies();
   else if (location.hash === '#/backup' && me.user.role === 'admin') showBackup();
+  else if (location.hash === '#/tickets' && me.user.role === 'admin') showTickets();
+  else if (location.hash === '#/profile') showProfile();
   else showList();
+}
+
+// ---------------- Support tickets (administrators) ----------------
+// Raised from the sign-in page. Fix the problem (Users page: correct the email, unlock, set a new
+// password), then resolve the ticket with a note; the person is emailed.
+async function refreshTicketCount(tickets) {
+  if (me?.user.role !== 'admin') return;
+  try {
+    const list = tickets || (await api('/api/tickets'));
+    const open = list.filter((t) => t.status === 'open').length;
+    $('#ticketCount').textContent = open;
+    $('#ticketCount').classList.toggle('hidden', !open);
+  } catch {}
+}
+
+async function showTickets() {
+  const tickets = await api('/api/tickets');
+  refreshTicketCount(tickets);
+  const open = tickets.filter((t) => t.status === 'open');
+  const accountState = (t) => (!t.account ? '<span class="badge declined">no account</span>'
+    : t.account.locked ? '<span class="badge declined">locked</span>'
+    : t.account.status === 'disabled' ? '<span class="badge voided">deactivated</span>' : '<span class="badge completed">active</span>');
+  app.innerHTML = `
+    <div class="wrap" style="max-width:1100px">
+      <div class="card" style="margin-bottom:16px">
+        <h1>Support tickets</h1>
+        <p class="muted small">Raised from the sign-in page when a sign-in code doesn't arrive or someone forgot their password. Fix the problem on the <a href="#/users">Users</a> page (correct the email, unlock, or set a new password), then resolve the ticket with a note: the person is emailed. ${open.length} open.</p>
+      </div>
+      <div class="card" style="padding:0;overflow-x:auto">
+        <table>
+          <thead><tr><th>Case</th><th>Opened</th><th>Person</th><th>Problem</th><th>Status</th><th></th></tr></thead>
+          <tbody>${tickets.length ? tickets.map((t) => `
+            <tr data-id="${t.id}">
+              <td style="white-space:nowrap"><strong>${esc(t.caseNo)}</strong></td>
+              <td class="small muted">${when(t.createdAt)}</td>
+              <td class="small">${t.name ? `<strong>${esc(t.name)}</strong><br>` : ''}${esc(t.email)}<br>${accountState(t)}</td>
+              <td class="small">${esc(t.kindLabel)}${t.message ? `<br><span class="muted">"${esc(t.message)}"</span>` : ''}<br><span class="muted">${esc(t.ip || '')} · ${esc(t.device || '')}</span></td>
+              <td class="small">${t.status === 'open' ? '<span class="badge sent">open</span>' : `<span class="badge completed">resolved</span><br><span class="muted">${when(t.resolvedAt)} by ${esc(t.resolvedBy)}<br>${esc(t.resolution)}</span>`}</td>
+              <td style="white-space:nowrap">${t.status === 'open' ? '<button class="primary small" data-resolve>Resolve</button>' : ''}</td>
+            </tr>`).join('') : '<tr><td colspan="6" class="muted" style="text-align:center;padding:24px">No support tickets.</td></tr>'}</tbody>
+        </table>
+      </div>
+    </div>`;
+  app.querySelectorAll('[data-resolve]').forEach((b) => (b.onclick = async () => {
+    const t = tickets.find((x) => x.id === b.closest('tr').dataset.id);
+    const note = prompt(`Resolve ${t.caseNo} for ${t.email}.\n\nWhat was done? (emailed to the person and kept in the system log)`, t.kind === 'code' ? 'Email address corrected; please sign in again.' : 'New password set; I will give it to you privately.');
+    if (note === null) return;
+    try {
+      await api(`/api/tickets/${t.id}/resolve`, { method: 'POST', body: { note } });
+      toast(`${t.caseNo} resolved`);
+      showTickets();
+    } catch (e) { toast(e.message, 4000); }
+  }));
+}
+
+// ---------------- My profile ----------------
+// Name, ID and email come from the account (administrators change them). The person sets their title,
+// company and a default signature, which the signing page offers them to confirm when they sign.
+async function showProfile() {
+  const p = await api('/api/profile');
+  let signature = p.signature;
+  const companyOptions = p.companies.length
+    ? `<select id="pfCompanySel"><option value="">Choose…</option>${p.companies.map((c) => `<option ${c === p.company ? 'selected' : ''}>${esc(c)}</option>`).join('')}<option value="__other" ${p.company && !p.companies.includes(p.company) ? 'selected' : ''}>Other (type the company name)</option></select>
+       <input id="pfCompany" maxlength="120" placeholder="Type the company name" style="margin-top:6px" value="${esc(p.companies.includes(p.company) ? '' : p.company)}">`
+    : `<input id="pfCompany" maxlength="120" value="${esc(p.company)}">`;
+  app.innerHTML = `
+    <div class="wrap" style="max-width:760px">
+      <div class="card" style="margin-bottom:16px">
+        <h1>My profile</h1>
+        <table class="sign-summary" style="max-width:560px">
+          <tr><th>User name</th><td>${esc(p.name)}</td></tr>
+          <tr><th>User ID</th><td>${esc(p.id)}</td></tr>
+          <tr><th>Email (sign-in ID)</th><td>${esc(p.email)}</td></tr>
+          <tr><th>Access</th><td>${p.role === 'admin' ? 'Administrator (full access)' : 'Sender'}</td></tr>
+          <tr><th>Member since</th><td>${when(p.createdAt)}</td></tr>
+        </table>
+        <p class="small muted" style="margin:0">Your name and email are set by an administrator. ${p.role === 'admin' ? '' : 'To change them or your password, ask your administrator.'}</p>
+        ${p.role === 'admin' ? '<button id="pfPassword" style="margin-top:12px">Change my password</button>' : ''}
+      </div>
+      <div class="card">
+        <h2>Signing details</h2>
+        <p class="small muted">Used when you sign: they appear with your signature, and the signing page fills them in for you to check.</p>
+        <label for="pfTitle">Title</label>
+        <input id="pfTitle" maxlength="120" placeholder="e.g. QA Manager" value="${esc(p.title)}">
+        <label for="${p.companies.length ? 'pfCompanySel' : 'pfCompany'}">Company name</label>
+        ${companyOptions}
+        <label style="margin-top:16px">Default signature</label>
+        <div id="pfSigCurrent"></div>
+        <canvas id="pfPad" class="profile-pad hidden"></canvas>
+        <div class="row" style="gap:8px;margin-top:8px;flex-wrap:wrap" id="pfSigTools"></div>
+        <div class="row end" style="margin-top:18px"><button id="pfSave" class="primary">Save profile</button></div>
+      </div>
+    </div>`;
+  if ($('#pfPassword')) $('#pfPassword').onclick = changeOwnPassword;
+
+  // Company: the administrators' list, or "Other" to type a name.
+  const sel = $('#pfCompanySel');
+  const other = $('#pfCompany');
+  const syncCompany = () => { if (sel) other.hidden = sel.value !== '__other'; };
+  if (sel) { sel.onchange = () => { syncCompany(); if (!other.hidden) other.focus(); }; syncCompany(); }
+  const companyValue = () => (sel ? (sel.value === '__other' ? other.value.trim() : sel.value) : other.value.trim());
+
+  // Default signature: shown when saved; "Draw a new signature" opens the pad.
+  const pad = $('#pfPad');
+  let inked = false;
+  const showSig = () => {
+    $('#pfSigCurrent').innerHTML = signature
+      ? `<div style="padding:10px;border:1px solid var(--line);border-radius:8px;background:#fff;max-width:520px"><img class="profile-sig" src="${signature}" alt="Your default signature"></div>`
+      : '<p class="small muted" style="margin:0">No default signature yet.</p>';
+    pad.classList.add('hidden');
+    $('#pfSigTools').innerHTML = `<button id="pfDraw">${signature ? 'Draw a new signature' : 'Draw my signature'}</button>${signature ? '<button id="pfRemove" class="ghost danger">Remove</button>' : ''}`;
+    $('#pfDraw').onclick = startDrawing;
+    if ($('#pfRemove')) $('#pfRemove').onclick = () => { signature = null; showSig(); toast('Removed. Save your profile to keep this change.'); };
+  };
+  const startDrawing = () => {
+    pad.classList.remove('hidden');
+    const ratio = window.devicePixelRatio || 1;
+    pad.width = pad.clientWidth * ratio;
+    pad.height = pad.clientHeight * ratio;
+    const g = pad.getContext('2d');
+    g.scale(ratio, ratio);
+    Object.assign(g, { lineWidth: 2.4, lineCap: 'round', lineJoin: 'round', strokeStyle: '#0b1a4d' });
+    inked = false;
+    let drawing = false;
+    const at = (e) => { const r = pad.getBoundingClientRect(); return [e.clientX - r.left, e.clientY - r.top]; };
+    pad.onpointerdown = (e) => { drawing = true; pad.setPointerCapture(e.pointerId); g.beginPath(); g.moveTo(...at(e)); };
+    pad.onpointermove = (e) => { if (!drawing) return; g.lineTo(...at(e)); g.stroke(); inked = true; };
+    pad.onpointerup = () => { drawing = false; };
+    $('#pfSigTools').innerHTML = '<span class="small muted" style="align-self:center">Sign in the box with your mouse, finger or stylus.</span><button id="pfClear" class="ghost">Clear</button><button id="pfUse" class="primary">Use this signature</button><button id="pfCancel" class="ghost">Cancel</button>';
+    $('#pfClear').onclick = () => { g.clearRect(0, 0, pad.width, pad.height); inked = false; };
+    $('#pfCancel').onclick = showSig;
+    $('#pfUse').onclick = () => {
+      if (!inked) return toast('Please draw your signature first');
+      signature = trimCanvas(pad);
+      showSig();
+      toast('Signature ready. Save your profile to keep it.');
+    };
+  };
+  showSig();
+
+  $('#pfSave').onclick = async () => {
+    try {
+      await api('/api/profile', { method: 'PUT', body: { title: $('#pfTitle').value, company: companyValue(), signature } });
+      toast('Profile saved');
+    } catch (e) { toast(e.message, 4000); }
+  };
+}
+
+// Crops a drawn signature to its ink, so it fills a signature field.
+function trimCanvas(canvas) {
+  const { width, height } = canvas;
+  const data = canvas.getContext('2d').getImageData(0, 0, width, height).data;
+  let x0 = width, y0 = height, x1 = -1, y1 = -1;
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      if (data[(y * width + x) * 4 + 3] > 10) {
+        if (x < x0) x0 = x; if (x > x1) x1 = x;
+        if (y < y0) y0 = y; if (y > y1) y1 = y;
+      }
+    }
+  }
+  if (x1 < 0) return null;
+  const pad = 6;
+  x0 = Math.max(0, x0 - pad); y0 = Math.max(0, y0 - pad);
+  x1 = Math.min(width - 1, x1 + pad); y1 = Math.min(height - 1, y1 + pad);
+  const out = document.createElement('canvas');
+  out.width = x1 - x0 + 1;
+  out.height = y1 - y0 + 1;
+  out.getContext('2d').drawImage(canvas, x0, y0, out.width, out.height, 0, 0, out.width, out.height);
+  return out.toDataURL('image/png');
 }
 
 // ---------------- Company list (administrators) ----------------
@@ -469,7 +684,8 @@ async function showUsers(notice = '') {
       try {
         const r = await api(`/api/users/${uid}/${act}`, { method: 'POST', body });
         if (r.password) {
-          await showUsers(showPassword(r.user, r.password));
+          await showUsers(showPassword(r.user, r.password, true));
+          toast(`New password set and emailed to ${r.user.email}`, 4000);
           bindCopy(r.password);
         } else {
           await showUsers();
@@ -481,21 +697,48 @@ async function showUsers(notice = '') {
 }
 
 // Sign-ins, failed logins, discarded drafts and test emails, with the hash-chain check.
-async function showSystemLog() {
+// A "From / To" time window for audit trails and the system log. Times are picked in local time and
+// sent to the server as ISO timestamps; leaving one empty means "from the beginning" / "until now".
+const timeRangeHtml = (id, range = {}) => `
+  <div class="row time-range" id="${id}" style="flex-wrap:wrap;align-items:flex-end;gap:8px;margin:10px 0">
+    <div><label for="${id}From">From</label><input type="datetime-local" id="${id}From" value="${range.fromLocal || ''}"></div>
+    <div><label for="${id}To">To</label><input type="datetime-local" id="${id}To" value="${range.toLocal || ''}"></div>
+    <button type="button" data-range-apply>Show</button>
+    <button type="button" class="ghost" data-range-clear>Clear</button>
+  </div>`;
+function readTimeRange(id) {
+  const iso = (v, extraMs = 0) => (v ? new Date(new Date(v).getTime() + extraMs).toISOString() : '');
+  const fromLocal = $(`#${id}From`).value;
+  const toLocal = $(`#${id}To`).value;
+  if (fromLocal && toLocal && fromLocal > toLocal) throw new Error('The start time must be before the end time.');
+  // "To 14:30" includes everything up to 14:30:59.
+  return { fromLocal, toLocal, from: iso(fromLocal), to: iso(toLocal, 59999) };
+}
+const rangeQuery = (r) => new URLSearchParams(Object.entries({ from: r.from, to: r.to }).filter(([, v]) => v)).toString();
+const inRange = (r) => (e) => (!r.from || e.at >= r.from) && (!r.to || e.at <= r.to);
+
+async function showSystemLog(range = {}) {
   app.innerHTML = '<div class="wrap card">Loading…</div>';
-  const { integrity, entries } = await api('/api/system-log');
+  const q = rangeQuery(range);
+  const { integrity, entries, total, matching } = await api(`/api/system-log${q ? `?${q}` : ''}`);
   app.innerHTML = `
     <div class="wrap">
       <div class="card">
-        <div class="row" style="justify-content:space-between;flex-wrap:wrap"><h1 style="margin:0">System audit log</h1><a class="btn" href="/api/system-log.pdf">⬇ Download PDF</a></div>
+        <div class="row" style="justify-content:space-between;flex-wrap:wrap"><h1 style="margin:0">System audit log</h1><a class="btn" href="/api/system-log.pdf${q ? `?${q}` : ''}">⬇ Download PDF${q ? ' (this period)' : ''}</a></div>
         <p class="muted small">Actions not tied to one agreement: sign-ins, failed sign-in attempts, users, passwords and access changes, discarded drafts, downloads. Each agreement's own audit trail is on its page.</p>
+        ${timeRangeHtml('logRange', range)}
+        ${q ? `<p class="small muted">Showing ${matching} of ${total} entries in this period${matching > 500 ? ' (newest 500 on screen; the PDF has all)' : ''}.</p>` : ''}
         ${integrityHtml(integrity)}
         <table>
           <thead><tr><th>When</th><th>Who</th><th>What</th><th>IP / details</th></tr></thead>
-          <tbody>${entries.map((e) => `<tr><td class="small">${when(e.at)}</td><td class="small">${esc(e.actor || '')}</td><td>${esc(e.text)}</td><td class="small muted">${esc(e.ip || '')}${e.detail ? `<br>${esc(e.detail)}` : ''}</td></tr>`).join('') || '<tr><td colspan="4" class="muted">No entries yet.</td></tr>'}</tbody>
+          <tbody>${entries.map((e) => `<tr><td class="small">${when(e.at)}</td><td class="small">${esc(e.actor || '')}</td><td>${esc(e.text)}</td><td class="small muted">${esc(e.ip || '')}${e.detail ? `<br>${esc(e.detail)}` : ''}</td></tr>`).join('') || `<tr><td colspan="4" class="muted">${q ? 'No entries in this period.' : 'No entries yet.'}</td></tr>`}</tbody>
         </table>
       </div>
     </div>`;
+  $('#logRange [data-range-apply]').onclick = () => {
+    try { showSystemLog(readTimeRange('logRange')); } catch (e) { toast(e.message, 4000); }
+  };
+  $('#logRange [data-range-clear]').onclick = () => showSystemLog();
 }
 
 // ---------------- Desktop notifications ----------------
@@ -555,7 +798,17 @@ async function showList() {
         <div class="small muted" style="margin-top:6px">Choose several PDFs to merge them into one document. You can reorder, rotate or delete pages afterwards.</div>
         <input type="file" id="file" accept="application/pdf" multiple hidden>
       </div>
-      <div class="card" style="margin-top:20px;padding:0">
+      <div class="row list-tools" style="margin-top:20px;flex-wrap:wrap;gap:12px;align-items:flex-end">
+        <div><label for="fStatus">Status</label><select id="fStatus">
+          <option value="">All statuses</option><option value="draft">Draft</option><option value="sent">Out for signature</option>
+          <option value="completed">Completed</option><option value="declined">Declined</option><option value="voided">Cancelled</option>
+        </select></div>
+        <div><label for="fSort">Sort by created</label><select id="fSort">
+          <option value="new">Newest first</option><option value="old">Oldest first</option>
+        </select></div>
+        <span class="small muted" id="listCount" style="padding-bottom:9px"></span>
+      </div>
+      <div class="card" style="margin-top:10px;padding:0">
         <table>
           <thead><tr><th>Agreement ID</th><th>Document</th><th>Status</th><th>Recipients</th><th>Created</th></tr></thead>
           <tbody id="rows"><tr><td colspan="5" class="muted">Loading…</td></tr></tbody>
@@ -582,7 +835,26 @@ async function showList() {
     if (files.length) uploadPdfs(files);
   };
 
-  const docs = await api('/api/documents');
+  const allDocs = await api('/api/documents');
+  // Filter by status and sort by created date; the choice is remembered on this browser.
+  const saved = (() => { try { return JSON.parse(localStorage.getItem('m365-list') || '{}'); } catch { return {}; } })();
+  $('#fStatus').value = saved.status || '';
+  $('#fSort').value = saved.sort || 'new';
+  const render = () => {
+    const status = $('#fStatus').value;
+    const sort = $('#fSort').value;
+    try { localStorage.setItem('m365-list', JSON.stringify({ status, sort })); } catch {}
+    const docs = allDocs.filter((d) => !status || d.status === status)
+      .sort((a, b) => (sort === 'old' ? a.createdAt.localeCompare(b.createdAt) : b.createdAt.localeCompare(a.createdAt)));
+    $('#listCount').textContent = status ? `${docs.length} of ${allDocs.length} agreements` : `${allDocs.length} agreement${allDocs.length === 1 ? '' : 's'}`;
+    renderRows(docs, !!status);
+  };
+  $('#fStatus').onchange = render;
+  $('#fSort').onchange = render;
+  render();
+}
+
+function renderRows(docs, filtered) {
   $('#rows').innerHTML = docs.length
     ? docs.map((d) => `
       <tr class="click" data-id="${d.id}">
@@ -592,7 +864,9 @@ async function showList() {
         <td class="small">${d.signers.map((s, i) => `${i + 1}. ${esc(s.name)} <span class="badge ${s.status}">${s.status}</span>`).join('<br>') || '<span class="muted">—</span>'}</td>
         <td class="small muted">${when(d.createdAt)}</td>
       </tr>`).join('')
-    : `<tr><td colspan="5" class="muted">No documents yet. Upload a PDF to get started.${me.user.role === 'admin' ? '' : ' You see the agreements you sent and the ones sent to you.'}</td></tr>`;
+    : filtered
+      ? '<tr><td colspan="5" class="muted">No agreements with this status.</td></tr>'
+      : `<tr><td colspan="5" class="muted">No documents yet. Upload a PDF to get started.${me.user.role === 'admin' ? '' : ' You see the agreements you sent and the ones sent to you.'}</td></tr>`;
   app.querySelectorAll('tr.click').forEach((tr) => (tr.onclick = () => (location.hash = `#/doc/${tr.dataset.id}`)));
 }
 
@@ -1481,7 +1755,7 @@ function showDetail(doc) {
   // Agreements are never deleted; while out for signature they can only be cancelled.
   actions.innerHTML = `
     ${done ? `<a class="btn" href="/api/documents/${doc.id}/print.pdf?tz=${encodeURIComponent(Intl.DateTimeFormat().resolvedOptions().timeZone)}" target="_blank" title="A copy stamped PRINTED COPY with your name and the time on every page">🖨 Print copy</a>` : ''}
-    ${me.user.can.downloadAudit ? `<a class="btn" href="/api/documents/${doc.id}/audit.pdf" title="Download this agreement's audit trail as a PDF">⬇ Audit trail (PDF)</a>` : ''}
+    ${me.user.can.downloadAudit ? `<a class="btn" id="auditPdf" href="/api/documents/${doc.id}/audit.pdf" title="Download this agreement's audit trail as a PDF (choose a period under Audit trail)">⬇ Audit trail (PDF)</a>` : ''}
     ${done ? `<a class="btn primary" href="/api/documents/${doc.id}/signed">Download signed PDF</a>` : ''}
     ${doc.status === 'sent' && doc.access !== 'recipient' ? '<button id="voidBtn" class="danger">Cancel agreement</button>' : ''}`;
   const sequential = doc.signingOrder === 'sequential';
@@ -1521,8 +1795,8 @@ function showDetail(doc) {
         </section>
         <section style="border:none">
           <h3>Audit trail</h3>
-          ${doc.auditHidden ? '<p class="small muted">🔒 You don\'t have access to view audit trails. An administrator can grant it.</p>' : integrityHtml(doc.auditIntegrity)}
-          <ul class="events">${doc.events.slice().reverse().map((e) => `<li><span class="muted small">${when(e.at)}${e.actor ? ` · ${esc(e.actor)}` : ''}</span><br>${esc(e.text)}${e.detail ? `<br><span class="small muted">${esc(e.detail)}</span>` : ''}</li>`).join('')}</ul>
+          ${doc.auditHidden ? '<p class="small muted">🔒 You don\'t have access to view audit trails. An administrator can grant it.</p>' : `${integrityHtml(doc.auditIntegrity)}${timeRangeHtml('auditRange')}<p class="small muted" id="auditCount"></p>`}
+          <ul class="events" id="auditEvents"></ul>
         </section>
         ${doc.comments?.length ? `<section style="border:none">
           <h3>Comments before sending (${doc.comments.length})</h3>
@@ -1531,6 +1805,30 @@ function showDetail(doc) {
       </aside>
       <div class="viewer"><div class="pages" id="pages"></div></div>
     </div>`;
+
+  // Audit trail for a chosen period; the PDF button downloads the same period.
+  const showEvents = (range = {}) => {
+    const list = doc.events.filter(inRange(range)).reverse();
+    $('#auditEvents').innerHTML = list.map((e) => `<li><span class="muted small">${when(e.at)}${e.actor ? ` · ${esc(e.actor)}` : ''}</span><br>${esc(e.text)}${e.detail ? `<br><span class="small muted">${esc(e.detail)}</span>` : ''}</li>`).join('')
+      || (doc.events.length ? '<li class="small muted">No events in this period.</li>' : '');
+    if ($('#auditCount')) $('#auditCount').textContent = range.from || range.to ? `Showing ${list.length} of ${doc.events.length} events in this period.` : '';
+    const q = rangeQuery(range);
+    if ($('#auditPdf')) {
+      $('#auditPdf').href = `/api/documents/${doc.id}/audit.pdf${q ? `?${q}` : ''}`;
+      $('#auditPdf').textContent = q ? '⬇ Audit trail (PDF, this period)' : '⬇ Audit trail (PDF)';
+    }
+  };
+  showEvents();
+  if ($('#auditRange')) {
+    $('#auditRange [data-range-apply]').onclick = () => {
+      try { showEvents(readTimeRange('auditRange')); } catch (e) { toast(e.message, 4000); }
+    };
+    $('#auditRange [data-range-clear]').onclick = () => {
+      $('#auditRangeFrom').value = '';
+      $('#auditRangeTo').value = '';
+      showEvents();
+    };
+  }
 
   app.querySelectorAll('[data-copy]').forEach((b) => (b.onclick = async () => {
     await navigator.clipboard.writeText(b.dataset.copy);

@@ -321,6 +321,100 @@ app.post('/api/logout', (req, res) => {
 app.get('/api/me', requireUser, (req, res) =>
   res.json({ company: COMPANY, companyFull: COMPANY_FULL, app: APP_NAME, mail: mailer.enabled(), notify: process.env.NOTIFY_EMAIL || '', dateFormats: DATE_FORMATS, reasons: REASONS, user: publicUser(req.user), idleMinutes: IDLE_MINUTES }));
 
+// ---------- Sign-in help tickets ----------
+// From the sign-in page: "the code never arrived" or "forgot my password / locked out". The person
+// gets a case number; administrators are emailed and see it under Admin > Support tickets, fix the
+// problem (for example correct the email, unlock, set a new password) and resolve it with a note.
+const TICKET_KINDS = { code: 'Sign-in code not received', password: 'Forgot password or locked out' };
+const ticketsByIp = new Map();
+const publicTicket = (t) => ({ caseNo: t.caseNo, kind: TICKET_KINDS[t.kind], status: t.status, createdAt: t.createdAt });
+
+app.post('/api/support/sign-in-help', async (req, res) => {
+  const kind = TICKET_KINDS[req.body.kind] ? req.body.kind : 'code';
+  // At most 5 tickets an hour from one address.
+  const ip = clientIp(req);
+  const recent = (ticketsByIp.get(ip) || []).filter((t) => Date.now() - t < 3600000);
+  if (recent.length >= 5) return res.status(429).json({ error: 'Too many requests. Please wait an hour, or contact your administrator directly.' });
+  // Who: the person part-way through sign-in (code step), or the email typed on the sign-in form.
+  const c = challenges.get(String(req.body.challenge || ''));
+  const user = c ? store.getUser(c.userId) : store.getUserByEmail(String(req.body.email || '').trim());
+  const email = user ? user.email : String(req.body.email || '').trim().toLowerCase();
+  if (!user && !isEmail(email)) return res.status(400).json({ error: 'Please type your email address in the sign-in form first.' });
+  const message = String(req.body.message || '').trim().slice(0, 1000);
+  // One open ticket per person and problem: asking again returns the same case number.
+  const open = store.tickets().find((t) => t.status === 'open' && t.kind === kind && sameEmail(t.email, email));
+  if (open) return res.json(publicTicket(open));
+  ticketsByIp.set(ip, [...recent, Date.now()]);
+
+  const ticket = {
+    id: id(8), caseNo: store.nextCaseNo(), kind, email, userId: user?.id || null, name: user?.name || '',
+    message, status: 'open', createdAt: now(), ip, device: deviceOf(req.headers['user-agent']),
+  };
+  store.tickets().unshift(ticket);
+  store.save();
+  req.actor = user ? actorOf(user) : email;
+  sysLog(req, 'support', `Support ticket ${ticket.caseNo} opened: ${TICKET_KINDS[kind]}`, `${user ? 'Account' : 'No account found for'} ${email}${message ? ` - "${message}"` : ''}`);
+  const facts = `Case: ${ticket.caseNo}\nProblem: ${TICKET_KINDS[kind]}\nPerson: ${user ? actorOf(user) : `${email} (no account with this email)`}${user ? `\nAccount: ${user.status}${user.lockedUntil && Date.parse(user.lockedUntil) > Date.now() ? ', locked' : ''}` : ''}${message ? `\nMessage: ${message}` : ''}\nFrom: ${ip}, ${ticket.device}`;
+  for (const admin of store.users().filter((u) => u.role === 'admin' && u.status === 'active')) {
+    mailer.send({ to: admin.email, subject: `Support ticket ${ticket.caseNo}: ${TICKET_KINDS[kind]}`, heading: 'New support ticket',
+      text: `${facts}\n\nOpen Admin > Support tickets to fix and resolve it.`, link: `${BASE_URL}/#/tickets`, linkLabel: 'OPEN SUPPORT TICKETS' })
+      .catch((e) => console.error('Mail error:', e.message));
+  }
+  res.json(publicTicket(ticket));
+});
+
+app.get('/api/tickets', requireUser, requireAdminRole, (req, res) => {
+  res.json(store.tickets().map((t) => {
+    const u = t.userId ? store.getUser(t.userId) : store.getUserByEmail(t.email);
+    return { ...t, kindLabel: TICKET_KINDS[t.kind], account: u ? { id: u.id, status: u.status, locked: !!(u.lockedUntil && Date.parse(u.lockedUntil) > Date.now()) } : null };
+  }));
+});
+
+app.post('/api/tickets/:id/resolve', requireUser, requireAdminRole, async (req, res) => {
+  const ticket = store.tickets().find((t) => t.id === req.params.id);
+  if (!ticket) return res.status(404).json({ error: 'Ticket not found' });
+  if (ticket.status !== 'open') return res.status(400).json({ error: 'This ticket is already resolved.' });
+  const note = String(req.body.note || '').trim().slice(0, 1000);
+  if (!note) return res.status(400).json({ error: 'Please say what was done, for the person and the record.' });
+  Object.assign(ticket, { status: 'resolved', resolvedAt: now(), resolvedBy: actorOf(req.user), resolution: note });
+  store.save();
+  sysLog(req, 'support', `Support ticket ${ticket.caseNo} resolved by ${req.user.name}`, note);
+  mailer.send({ to: ticket.email, subject: `Your support case ${ticket.caseNo} is resolved`, heading: 'Support case resolved',
+    text: `Hello${ticket.name ? ` ${ticket.name}` : ''},\n\nYour case ${ticket.caseNo} (${TICKET_KINDS[ticket.kind]}) has been resolved by ${req.user.name}.`,
+    details: [['Case', ticket.caseNo], ['What was done', note]], link: BASE_URL, linkLabel: 'SIGN IN' })
+    .catch((e) => console.error('Mail error:', e.message));
+  res.json({ ok: true });
+});
+
+// ---------- My profile ----------
+// Name and email (the sign-in ID) are set by administrators. Each person sets their own title, company
+// and default signature; these are also saved as their signer details, so the signing page offers them
+// (for the person to confirm) whenever a document is sent to their email.
+app.get('/api/profile', requireUser, (req, res) => {
+  const signer = store.getProfile(req.user.email) || {};
+  res.json({
+    id: req.user.id, name: req.user.name, email: req.user.email, role: req.user.role, createdAt: req.user.createdAt,
+    title: req.user.title ?? signer.title ?? '', company: req.user.company ?? signer.company ?? '',
+    signature: req.user.signature ?? signer.signature ?? null, companies: companyNames(),
+  });
+});
+
+app.put('/api/profile', requireUser, (req, res) => {
+  const title = String(req.body.title ?? '').trim().slice(0, 120);
+  const company = String(req.body.company ?? '').trim().slice(0, 120);
+  const signature = req.body.signature || null;
+  if (signature && !isPng(signature)) return res.status(400).json({ error: 'The signature could not be read. Please draw it again.' });
+  const changes = [];
+  if (title !== (req.user.title || '')) changes.push('title');
+  if (company !== (req.user.company || '')) changes.push('company');
+  if (signature !== (req.user.signature || null)) changes.push(signature ? 'default signature' : 'default signature removed');
+  Object.assign(req.user, { title, company, signature });
+  store.save();
+  store.saveProfile(req.user.email, { name: req.user.name, title, company, ...(signature ? { signature, appearance: 'DRAW' } : { signature: null }) });
+  if (changes.length) sysLog(req, 'user', `${req.user.name} updated their profile: ${changes.join(', ')}`);
+  res.json({ ok: true });
+});
+
 // ---------- Passwords ----------
 // Only administrators set passwords. A password an administrator sets or generates is shown to that
 // administrator once, to hand to the person privately; afterwards only its scrypt hash exists.
@@ -429,7 +523,15 @@ app.post('/api/users/:id/:action', requireUser, requireAdminRole, async (req, re
       user.lockedUntil = undefined;
       if (user.status === 'invited') user.status = 'active';
       if (!self) signOut(); // a new password signs the person out everywhere
-      sysLog(req, 'password', `New password set for ${actorOf(user)} by ${req.user.name}`);
+      sysLog(req, 'password', `New password set for ${actorOf(user)} by ${req.user.name}`, 'New password emailed to the user.');
+      // Tell the person, with their sign-in ID and the new password (like the welcome email).
+      mailer.send({
+        to: user.email, subject: `Your ${APP_NAME} password has been changed`, heading: 'Your password has been changed',
+        text: `Hello ${user.name},\n\n${self ? 'You' : req.user.name} set a new password for your ${APP_NAME} account.${self ? '' : ' You have been signed out everywhere; sign in again with the new password.'}`,
+        details: [['Sign-in ID', user.email], ['New password', password]],
+        after: `When you sign in, we will also email you a one-time code.\n\nKeep your password private and delete this email once you have noted it. If you didn't ask for this change, contact your administrator at once.`,
+        link: BASE_URL, linkLabel: 'SIGN IN', note: 'It contains your password.',
+      }).catch((e) => console.error('Mail error:', e.message));
       break;
     }
     case 'details': {
@@ -890,8 +992,13 @@ app.get('/api/documents/:id/audit.pdf', requireUser, async (req, res) => {
   const doc = store.get(req.params.id);
   if (!doc) return res.status(404).json({ error: 'Not found' });
   if (!can(req.user, 'downloadAudit')) return res.status(403).json({ error: 'You do not have access to download audit trails. Ask an administrator.' });
-  const bytes = await reports.auditTrailPdf(doc, COMPANY, { generatedBy: req.actor, integrity: audit.verify(doc.events) });
-  log(doc, `Audit trail downloaded as PDF by ${req.actor}`, req, 'download');
+  const range = timeRange(req.query);
+  const events = doc.events.filter(range.within);
+  const bytes = await reports.auditTrailPdf({ ...doc, events }, COMPANY, {
+    generatedBy: req.actor, integrity: audit.verify(doc.events),
+    rangeText: range.active ? `Events from ${range.label} (${events.length} of ${doc.events.length})` : '',
+  });
+  log(doc, `Audit trail downloaded as PDF by ${req.actor}${range.active ? ` (events from ${range.label})` : ''}`, req, 'download');
   store.save();
   sendFile(res, bytes, `${doc.agreementId || doc.title} - audit trail.pdf`);
 });
@@ -912,18 +1019,38 @@ app.get('/api/documents/:id/print.pdf', requireUser, async (req, res) => {
 });
 
 // System log as a PDF (administrators only).
+// Optional time window for audit trails and the system log: ?from=<ISO time>&to=<ISO time>, either
+// may be left out. Integrity is always checked over the whole chain, so a window never hides tampering.
+function timeRange(query) {
+  const parse = (v) => {
+    if (!v) return null;
+    const t = Date.parse(String(v));
+    if (Number.isNaN(t)) throw Object.assign(new Error('Please give valid start and end times.'), { status: 400 });
+    return t;
+  };
+  const from = parse(query.from);
+  const to = parse(query.to);
+  if (from !== null && to !== null && from > to) throw Object.assign(new Error('The start time must be before the end time.'), { status: 400 });
+  const within = (e) => { const t = Date.parse(e.at); return (from === null || t >= from) && (to === null || t <= to); };
+  const label = from === null && to === null ? '' : `${from === null ? 'the beginning' : auditStamp(new Date(from).toISOString())} to ${to === null ? 'now' : auditStamp(new Date(to).toISOString())}`;
+  return { within, label, active: from !== null || to !== null };
+}
+
 app.get('/api/system-log.pdf', requireUser, requireAdminRole, async (req, res) => {
-  const entries = syslog.read();
-  const integrity = audit.verify(entries);
-  const bytes = await reports.systemLogPdf(entries, COMPANY, { generatedBy: req.actor, integrity });
-  sysLog(req, 'download', `System audit log downloaded as PDF by ${req.user.name} (${entries.length} entries)`);
+  const all = syslog.read();
+  const range = timeRange(req.query);
+  const entries = all.filter(range.within);
+  const bytes = await reports.systemLogPdf(entries, COMPANY, { generatedBy: req.actor, integrity: audit.verify(all), rangeText: range.active ? `Entries from ${range.label} (${entries.length} of ${all.length})` : '' });
+  sysLog(req, 'download', `System audit log downloaded as PDF by ${req.user.name} (${entries.length} entries${range.active ? `, ${range.label}` : ''})`);
   sendFile(res, bytes, `System audit log ${new Date().toISOString().slice(0, 10)}.pdf`);
 });
 
-// System log (sign-ins, discarded drafts, test emails) with its integrity check.
+// System log (sign-ins, user changes, backups) with its integrity check; optional ?from=&to=.
 app.get('/api/system-log', requireUser, requireAdminRole, (req, res) => {
-  const entries = syslog.read();
-  res.json({ integrity: audit.verify(entries), entries: entries.slice(-500).reverse() });
+  const all = syslog.read();
+  const range = timeRange(req.query);
+  const entries = all.filter(range.within);
+  res.json({ integrity: audit.verify(all), total: all.length, matching: entries.length, entries: entries.slice(-500).reverse() });
 });
 
 // ---------- Admin: merge files & organize pages ----------

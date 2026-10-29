@@ -47,4 +47,11 @@ async function signIn(c, email, password) {
   ok((await signIn(client(), 'divya.gadhiya@test.local', 'River-stone-2026')).status === 200, 'new email signs in with the same password, code sent to the new address');
   const log = (await admin('/api/system-log')).data;
   ok(JSON.stringify(log).includes('Details of Divya G (divya@test.local) changed'), 'the change is recorded in the system log');
+
+  // Administrator sets a new password: the user is emailed it, and it works
+  const set = await admin(`/api/users/${uid}/set-password`, { generate: true });
+  await sleep(200);
+  const pwMail = mails('divya.gadhiya@test.local').find((m) => m.includes('password has been changed')) || '';
+  ok(set.status === 200 && pwMail.includes('Sign-in ID: divya.gadhiya@test.local') && pwMail.includes(`New password: ${set.data.password}`), 'a new password set by the administrator is emailed to the user with their sign-in ID');
+  ok((await signIn(client(), 'divya.gadhiya@test.local', set.data.password)).status === 200, 'the emailed password works');
 })().catch((e) => { console.error(e); process.exit(1); });
