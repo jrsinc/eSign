@@ -1753,6 +1753,21 @@ function cancelAgreement(doc) {
   };
 }
 
+// A ready-written email with a signer's link, sent from the sender's own mailbox (Outlook or the
+// default mail app). Useful when Method 365's own emails are held by the recipient's mail filter.
+function outlookMailto(doc, s) {
+  const subject = `Please sign "${doc.title}"${doc.agreementId ? ` [${doc.agreementId}]` : ''}`;
+  const body = [
+    `Hello ${s.name},`,
+    `${me.user.name} has sent you "${doc.title}"${doc.agreementId ? ` (agreement ${doc.agreementId})` : ''} to sign in ${me.app}.`,
+    doc.message || '',
+    `Open this link to review and sign:\n${s.link}`,
+    'If you have a Method 365 account, sign in with your email and password when asked. Otherwise a temporary password is emailed to you when you open the link.',
+    `Thank you,\n${me.user.name}`,
+  ].filter(Boolean).join('\n\n');
+  return `mailto:${encodeURIComponent(s.email)}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
+}
+
 // ---------------- Sent / completed view ----------------
 function showDetail(doc) {
   document.onkeydown = null;
@@ -1793,6 +1808,7 @@ function showDetail(doc) {
                 ${doc.status === 'sent' && s.status !== 'signed' && s.link ? `
                   <div class="small" style="color:var(--ok);margin-top:4px">● ${sequential ? 'Their turn to sign now' : 'Can sign now'}</div>
                   <div class="linkbox"><input readonly value="${esc(s.link)}"><button data-copy="${esc(s.link)}">Copy</button></div>
+                  <a class="btn ghost small" style="padding:4px 0" href="${esc(outlookMailto(doc, s))}" title="Opens a ready-written email in Outlook (or your mail app) from your own mailbox">✉ Email from Outlook</a>
                   ${me.mail ? `<button class="ghost small" data-remind="${s.id}" style="padding:4px 0">Send reminder</button>` : ''}` : ''}
                 ${doc.status === 'sent' && s.status !== 'signed' && !s.link ? `
                   <div class="small muted" style="margin-top:4px">🔒 Waiting for signer ${current.join(', ')}. Their link is sent automatically after that.</div>` : ''}

@@ -117,14 +117,12 @@ sudo cp deploy/esign.service /etc/systemd/system/ && sudo systemctl enable --now
 For HTTPS use **Caddy** (`deploy/Caddyfile`, change `esign:3000` to `127.0.0.1:3000`) or **Nginx**
 (`deploy/nginx-esign.conf` + `certbot --nginx`). Logs: `journalctl -u esign -f`.
 
-## 5. Option C: Windows Server
+## 5. Option C: a Windows PC
 
-1. Install Node.js 24 LTS and copy the project to e.g. `C:\esign`, then `npm ci --omit=dev`.
-2. Create `C:\esign\.env` from `.env.example`.
-3. Run it as a Windows service with [NSSM](https://nssm.cc): `nssm install JRS-eSign "C:\Program Files\nodejs\node.exe" server.js`,
-   set *Startup directory* to `C:\esign`, then `nssm start JRS-eSign`.
-4. HTTPS: install Caddy as a service too, with `deploy/Caddyfile` (use `127.0.0.1:3000`), or use IIS with
-   URL Rewrite + ARR as a reverse proxy and your company certificate.
+Follow **[WINDOWS-SERVER.md](WINDOWS-SERVER.md)**: `deploy/windows/setup.ps1` installs Node.js, Git, NSSM
+and cloudflared, downloads the code to `C:\Method365` and runs it as the **Method365** Windows service; a
+Cloudflare tunnel gives it https://esign.method365sign.com with no open ports. `deploy/windows/update.ps1`
+updates it with a data backup and automatic roll-back.
 
 ## 6. Email from esign-jrsllc@method365sign.com
 

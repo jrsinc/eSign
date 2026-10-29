@@ -16,14 +16,19 @@ permissions:
 
 jobs:
   test:
-    name: Tests
+    # Node 24 (development PC, Docker image) and 26 (current LTS, installed on Windows servers by winget).
+    name: Tests (Node ${{ matrix.node }})
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [24, 26]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 24
+          node-version: ${{ matrix.node }}
           cache: npm
       - run: npm ci
       - name: Syntax check
