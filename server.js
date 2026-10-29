@@ -42,6 +42,7 @@ if (PRODUCTION) {
   if (!process.env.ADMIN_PASSWORD || ADMIN_PASSWORD.length < 12 || /^(admin|change-me)/i.test(ADMIN_PASSWORD)) problems.push('ADMIN_PASSWORD must be set to a strong value (12+ characters, not the example).');
   if (!/^https:\/\//.test(BASE_URL)) problems.push('BASE_URL must be the public https:// address, e.g. https://esign.yourcompany.com');
   if (!process.env.SMTP_HOST) problems.push('Email must be configured (SMTP_HOST, SMTP_USER, SMTP_PASS, MAIL_FROM): signers receive their links and temporary passwords by email.');
+  if (String(process.env.LOGIN_CODE || 'on').toLowerCase() === 'off') problems.push('LOGIN_CODE=off is for testing only: remove it so sign-in needs the emailed code (two-step sign-in).');
   if (problems.length) {
     console.error(`Not starting: production settings need attention.\n- ${problems.join('\n- ')}`);
     process.exit(1);
@@ -134,6 +135,10 @@ const IDLE_MINUTES = Number(process.env.SESSION_IDLE_MINUTES || 30);
 const LOCK_AFTER = 5; // wrong passwords in a row
 const LOCK_MINUTES = 15;
 const OTP_MINUTES = 10;
+// LOGIN_CODE=off skips the emailed sign-in code (password only). Meant only for testing while email
+// delivery is being set up; production refuses to start with it off.
+const LOGIN_CODE = String(process.env.LOGIN_CODE || 'on').toLowerCase() !== 'off';
+if (!LOGIN_CODE) console.warn('WARNING: LOGIN_CODE=off - sign-in uses the password only (no emailed code). Turn it back on before real use.');
 const ROLES = ['admin', 'sender'];
 
 const SESSIONS_FILE = path.join(store.DATA_DIR, 'sessions.json');
@@ -199,7 +204,7 @@ const POLICY_EFFECTIVE = '28-Oct-2026';
 const SUPPORT_EMAIL = process.env.SUPPORT_EMAIL || process.env.MAIL_FROM || process.env.SMTP_USER || '';
 app.get('/api/policy-info', (req, res) => res.json({ app: APP_NAME, company: COMPANY, companyFull: COMPANY_FULL, contact: SUPPORT_EMAIL, version: POLICY_VERSION, effective: POLICY_EFFECTIVE, baseUrl: BASE_URL }));
 
-app.get('/api/auth/status', (req, res) => res.json({ company: COMPANY, companyFull: COMPANY_FULL, app: APP_NAME, setupRequired: store.users().length === 0, mail: mailer.enabled() }));
+app.get('/api/auth/status', (req, res) => res.json({ company: COMPANY, companyFull: COMPANY_FULL, app: APP_NAME, setupRequired: store.users().length === 0, mail: mailer.enabled(), loginCode: LOGIN_CODE }));
 
 // First-time setup: the .env ADMIN_PASSWORD proves ownership once, to create the first administrator.
 app.post('/api/auth/setup', (req, res) => {
@@ -255,8 +260,13 @@ app.post('/api/login', async (req, res) => {
   user.failed = 0;
   user.lockedUntil = undefined;
   store.save();
-  const challenge = id(18);
   req.actor = actorOf(user);
+  // Sign-in codes turned off (testing only; refused in production): the password alone signs in.
+  if (!LOGIN_CODE) {
+    startSession(req, res, user, 'password only - sign-in codes are turned off');
+    return res.json({ ok: true, signedIn: true });
+  }
+  const challenge = id(18);
   try {
     await sendOtp(user, challenge, req);
   } catch (e) {
@@ -284,16 +294,21 @@ app.post('/api/login/verify', (req, res) => {
     return res.status(400).json({ error: 'That code is not correct.' });
   }
   challenges.delete(req.body.challenge);
+  startSession(req, res, user, 'password + emailed code');
+  res.json({ ok: true });
+});
+
+// Signs the user in on this browser and records how they proved who they are.
+function startSession(req, res, user, how) {
   const sid = id(24);
   sessions.set(sid, { userId: user.id, expires: Date.now() + SESSION_HOURS * 3600000, lastSeen: Date.now() });
   saveSessions();
   user.lastLoginAt = now();
   store.save();
-  sysLog(req, 'login', `${user.name} signed in (password + emailed code)`, `Device: ${deviceOf(req.headers['user-agent'])}`);
+  sysLog(req, 'login', `${user.name} signed in (${how})`, `Device: ${deviceOf(req.headers['user-agent'])}`);
   // HTTPS-only when the visitor came in over HTTPS (e.g. through ngrok), so local http:// access still works.
   res.cookie('sid', sid, { httpOnly: true, sameSite: 'lax', secure: req.secure });
-  res.json({ ok: true });
-});
+}
 
 app.post('/api/login/resend', async (req, res) => {
   const c = challenges.get(String(req.body.challenge || ''));
@@ -319,7 +334,7 @@ app.post('/api/logout', (req, res) => {
 });
 
 app.get('/api/me', requireUser, (req, res) =>
-  res.json({ company: COMPANY, companyFull: COMPANY_FULL, app: APP_NAME, mail: mailer.enabled(), notify: process.env.NOTIFY_EMAIL || '', dateFormats: DATE_FORMATS, reasons: REASONS, user: publicUser(req.user), idleMinutes: IDLE_MINUTES }));
+  res.json({ company: COMPANY, companyFull: COMPANY_FULL, app: APP_NAME, mail: mailer.enabled(), loginCode: LOGIN_CODE, notify: process.env.NOTIFY_EMAIL || '', dateFormats: DATE_FORMATS, reasons: REASONS, user: publicUser(req.user), idleMinutes: IDLE_MINUTES }));
 
 // ---------- Sign-in help tickets ----------
 // From the sign-in page: "the code never arrived" or "forgot my password / locked out". The person

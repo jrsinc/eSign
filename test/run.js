@@ -12,7 +12,12 @@ const filter = process.argv[2] || '';
 const suites = fs.readdirSync(__dirname).filter((f) => /^\d+-.+\.test\.js$/.test(f) && f.includes(filter)).sort();
 
 // Settings that must never reach a test server (real email, production checks).
-const BLOCKED = /^(SMTP_|MAIL_FROM|NOTIFY_EMAIL|SUPPORT_EMAIL|ADMIN_PASSWORD|NODE_ENV|BASE_URL|DATA_DIR|BACKUP_DIR|AUTO_BACKUP|PORT$|APP_NAME|COMPANY_NAME|TRUST_PROXY)/;
+const BLOCKED = /^(SMTP_|MAIL_FROM|NOTIFY_EMAIL|SUPPORT_EMAIL|ADMIN_PASSWORD|NODE_ENV|BASE_URL|DATA_DIR|BACKUP_DIR|AUTO_BACKUP|PORT$|APP_NAME|COMPANY_NAME|TRUST_PROXY|LOGIN_CODE)/;
+// A suite can ask for server settings on its first line: `// env: LOGIN_CODE=off OTHER=value`.
+const suiteEnv = (file) => {
+  const m = /^\/\/ env:(.*)$/m.exec(fs.readFileSync(path.join(__dirname, file), 'utf8').split('\n')[0]);
+  return m ? Object.fromEntries(m[1].trim().split(/\s+/).map((kv) => kv.split('='))) : {};
+};
 const cleanEnv = Object.fromEntries(Object.entries(process.env).filter(([k]) => !BLOCKED.test(k)));
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -46,7 +51,7 @@ function runNode(args, env) {
     const logFile = path.join(dir, 'server.log');
     const port = 4100 + i;
     const base = `http://127.0.0.1:${port}`;
-    const env = { ...cleanEnv, ENV_FILE: 'none', DATA_DIR: dataDir, PORT: String(port), BASE_URL: base, COMPANY_NAME: 'JRS' };
+    const env = { ...cleanEnv, ENV_FILE: 'none', DATA_DIR: dataDir, PORT: String(port), BASE_URL: base, COMPANY_NAME: 'JRS', ...suiteEnv(suite) };
 
     console.log(`\n=== ${suite}`);
     const log = fs.openSync(logFile, 'w');

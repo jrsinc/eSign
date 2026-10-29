@@ -65,7 +65,7 @@ async function showLogin(notice = '') {
         <p id="loginErr" class="small" style="color:var(--danger)"></p>
         <button class="primary" style="width:100%">Continue</button>
       </form>
-      <p class="small muted" style="margin-top:14px">Two-step sign-in: after your password, we email you a one-time code.<br>Forgot your password or locked out? <a href="#" id="helpPassword">Ask an administrator for help</a></p>
+      <p class="small muted" style="margin-top:14px">${status.loginCode === false ? '' : 'Two-step sign-in: after your password, we email you a one-time code.<br>'}Forgot your password or locked out? <a href="#" id="helpPassword">Ask an administrator for help</a></p>
       <p class="small muted" style="margin:10px 0 0;text-align:center"><a href="/policy.html" target="_blank" rel="noopener">Policies and privacy</a></p>
     </div>`;
   if (nextUrl && params.get('email')) {
@@ -84,6 +84,8 @@ async function showLogin(notice = '') {
     btn.disabled = true;
     try {
       const r = await api('/api/login', { method: 'POST', body: { email: $('#email').value, password: $('#pw').value } });
+      // Sign-in codes turned off (testing): the password alone signed us in.
+      if (r.signedIn) { location.hash = ''; return boot(); }
       showCodeStep(r);
     } catch (err) {
       $('#loginErr').textContent = err.message;
@@ -788,6 +790,10 @@ async function showList() {
         <div class="card row" style="margin-bottom:16px;padding:12px 16px;background:#fffbeb;border-color:#fde68a">
           <span>⚠️ <strong>Email is off</strong>: signers and sign-in codes can't be emailed. Ask your administrator to check the email settings.</span>
         </div>`}
+      ${me.loginCode === false && me.user.role === 'admin' ? `
+        <div class="card row" style="margin-bottom:16px;padding:12px 16px;background:#fef2f2;border-color:#fecaca">
+          <span>⚠️ <strong>Sign-in codes are turned off</strong> (testing): everyone signs in with their password only. Remove <code>LOGIN_CODE=off</code> from <code>.env</code> and restart before real use.</span>
+        </div>` : ''}
       ${'Notification' in window && Notification.permission === 'default' ? `
         <div class="card row" style="margin-bottom:16px;padding:10px 16px;flex-wrap:wrap" id="notifyBar">
           <span style="flex:1;min-width:220px">🔔 Get a desktop notification when someone signs or an agreement is completed.</span>
