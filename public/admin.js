@@ -990,9 +990,9 @@ async function showList() {
           <button id="notifyBtn">Turn on notifications</button>
         </div>` : ''}
       <div class="drop" id="drop">
-        <strong>Drop PDFs here</strong> or click to upload a document for signature
-        <div class="small muted" style="margin-top:6px">Choose several PDFs to merge them into one document. You can reorder, rotate or delete pages afterwards.</div>
-        <input type="file" id="file" accept="application/pdf" multiple hidden>
+        <strong>Drop files here</strong> or click to upload a document for signature
+        <div class="small muted" style="margin-top:6px">PDF, Word, Excel, PowerPoint, text or images (JPG, PNG, GIF, WebP, TIFF, BMP). Choose several to merge them into one document; Word files and images are turned into PDF pages. You can reorder, rotate or delete pages afterwards.</div>
+        <input type="file" id="file" accept="${UPLOAD_ACCEPT}" multiple hidden>
       </div>
       <div class="row list-tools" style="margin-top:20px;flex-wrap:wrap;gap:12px;align-items:flex-end">
         <div><label for="fStatus">Status</label><select id="fStatus">
@@ -1027,7 +1027,7 @@ async function showList() {
   drop.ondrop = (e) => {
     e.preventDefault();
     drop.classList.remove('over');
-    const files = [...e.dataTransfer.files].filter((f) => /pdf$/i.test(f.type) || /\.pdf$/i.test(f.name));
+    const files = [...e.dataTransfer.files].filter((f) => UPLOAD_EXT.test(f.name));
     if (files.length) uploadPdfs(files);
   };
 
@@ -1066,15 +1066,23 @@ function renderRows(docs, filtered) {
   app.querySelectorAll('tr.click').forEach((tr) => (tr.onclick = () => (location.hash = `#/doc/${tr.dataset.id}`)));
 }
 
+// Files that can start an agreement; the server turns Word documents and images into PDF pages.
+const UPLOAD_EXT = /\.(pdf|jpe?g|png|gif|webp|tiff?|avif|bmp|svg|docx?|rtf|odt|txt|xlsx?|ods|pptx?|odp)$/i;
+const UPLOAD_ACCEPT = '.pdf,.doc,.docx,.rtf,.odt,.txt,.xls,.xlsx,.ods,.ppt,.pptx,.odp,.jpg,.jpeg,.png,.gif,.webp,.tif,.tiff,.avif,.bmp,.svg';
+
 async function uploadPdfs(files) {
   const fd = new FormData();
   files.forEach((f) => fd.append('file', f));
-  toast(files.length > 1 ? `Merging ${files.length} files…` : 'Uploading…');
+  const converting = files.some((f) => !/\.pdf$/i.test(f.name));
+  toast(converting ? 'Uploading and converting to PDF…' : files.length > 1 ? `Merging ${files.length} files…` : 'Uploading…', 20000);
+  const busy = [...document.querySelectorAll('.toast')].pop();
   try {
     const doc = await api('/api/documents', { method: 'POST', body: fd });
     location.hash = `#/doc/${doc.id}`;
   } catch (e) {
     toast(e.message, 5000);
+  } finally {
+    busy?.remove();
   }
 }
 
@@ -1794,9 +1802,9 @@ async function showOrganizer(doc) {
     <div class="wrap" style="max-width:1200px">
       <div class="card row" style="flex-wrap:wrap;margin-bottom:16px">
         <div style="flex:1;min-width:240px"><h2 style="margin:0">Organize pages</h2>
-          <span class="small muted">Drag pages to reorder. Rotate or delete pages, or add more PDFs to merge them in.</span></div>
+          <span class="small muted">Drag pages to reorder. Rotate or delete pages, or add more files (PDF, Word, images) to merge them in.</span></div>
         <button id="addFiles">+ Add PDF files</button>
-        <input type="file" id="moreFiles" accept="application/pdf" multiple hidden>
+        <input type="file" id="moreFiles" accept="${UPLOAD_ACCEPT}" multiple hidden>
       </div>
       <div class="thumbs" id="thumbs"></div>
     </div>`;

@@ -52,6 +52,7 @@ Copy `.env.example` to `.env`, fill it in, and restart. Every setting is explain
 | `NODE_ENV` | `production` turns on start-up safety checks | |
 | `PORT`, `DATA_DIR`, `BACKUP_DIR` | Port, data folder, backups folder | `3000`, `./data`, `./backups` |
 | `AUTO_BACKUP_HOURS`, `BACKUP_KEEP` | Automatic backups until a schedule is set on the Backup page (production: daily 02:00) | off, 14 |
+| `SOFFICE_PATH` | LibreOffice program, for Word/Excel/PowerPoint uploads | found automatically |
 | `SYSTEM_ADMIN_EMAIL` | The only account allowed to restart the server or erase data | first administrator |
 | `SMTP_HOST`, `SMTP_PORT`, `SMTP_SECURE`, `SMTP_USER`, `SMTP_PASS`, `MAIL_FROM` | Outgoing email | email off |
 | `NOTIFY_EMAIL` | Copy of "signed", "declined", "completed" and "signing locked" notices | off |

@@ -44,7 +44,7 @@ Time: about 1 hour, plus waiting for Cloudflare to activate the domain.
    irm https://raw.githubusercontent.com/jrsinc/eSign/main/deploy/windows/setup.ps1 -OutFile $env:TEMP\m365-setup.ps1
    & $env:TEMP\m365-setup.ps1
    ```
-   It installs Node.js, Git, NSSM and cloudflared, downloads the code to **`C:\Method365`**, then stops and asks for `.env` and `data`.
+   It installs Node.js, Git, NSSM, cloudflared and LibreOffice (for Word uploads), downloads the code to **`C:\Method365`**, then stops and asks for `.env` and `data`.
 3. Copy **`.env`** and the **`data`** folder from the USB stick into **`C:\Method365`**.
 4. Open `C:\Method365\.env` in Notepad and change one line:
    ```

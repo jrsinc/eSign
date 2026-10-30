@@ -22,6 +22,7 @@ const Formula = require('./public/formula.js');
 const audit = require('./lib/audit');
 const authLib = require('./lib/auth');
 const reports = require('./lib/reports');
+const convert = require('./lib/convert');
 const { inspectSignatures } = require('./lib/verifysig');
 
 const PORT = Number(process.env.PORT || 3000);
@@ -994,6 +995,15 @@ async function notifySender(subject, text, attachments, doc) {
 }
 
 // ---------- PDF helpers ----------
+// Word documents and images are turned into PDF pages first (lib/convert.js). The audit trail records
+// each converted file's name and the fingerprint of the file as uploaded.
+const CONVERTED_FROM = { image: 'image', office: 'office document' };
+async function uploadsToPdfs(files) {
+  const out = [];
+  for (const f of files) out.push({ ...(await convert.toPdf(f.buffer, f.originalname)), name: f.originalname, hash: sha256(f.buffer) });
+  return out;
+}
+
 async function loadPdf(buf) {
   if (buf.subarray(0, 5).toString() !== '%PDF-') throw Object.assign(new Error('Please upload PDF files only.'), { status: 400 });
   try {
@@ -1066,12 +1076,13 @@ app.get('/api/documents', requireUser, (req, res) => {
 });
 
 app.post('/api/documents', requireUser, upload.array('file', 20), async (req, res) => {
-  if (!req.files?.length) return res.status(400).json({ error: 'Please upload a PDF file' });
-  const bytes = req.files.length === 1 ? (await loadPdf(req.files[0].buffer), req.files[0].buffer) : await mergePdfs(req.files.map((f) => f.buffer));
+  if (!req.files?.length) return res.status(400).json({ error: 'Please choose a file to upload.' });
+  const parts = await uploadsToPdfs(req.files);
+  const bytes = parts.length === 1 ? (await loadPdf(parts[0].pdf), parts[0].pdf) : await mergePdfs(parts.map((p) => p.pdf));
   const doc = {
     id: id(9),
     transactionId: `CB${id(30)}`,
-    title: (req.body.title || req.files[0].originalname.replace(/\.pdf$/i, '')).slice(0, 200),
+    title: (req.body.title || req.files[0].originalname.replace(/\.[a-z0-9]{1,5}$/i, '')).slice(0, 200),
     emailSubject: '',
     message: '',
     reminder: 'none',
@@ -1092,6 +1103,7 @@ app.post('/api/documents', requireUser, upload.array('file', 20), async (req, re
   };
   fs.writeFileSync(filePath(doc.originalFile), bytes);
   log(doc, `Document created by ${req.user.name} (${req.user.email})`, req, 'created');
+  for (const p of parts.filter((x) => x.from !== 'pdf')) log(doc, `Converted to PDF: ${p.name} (${CONVERTED_FROM[p.from]})`, req, 'pages', `SHA-256 of the uploaded file: ${p.hash}`);
   if (req.files.length > 1) log(doc, `${req.files.length} files merged: ${req.files.map((f) => f.originalname).join(', ')}`, req, 'pages');
   store.insert(doc);
   res.json(adminView(doc, req));
@@ -1335,15 +1347,16 @@ app.get('/api/system-log', requireUser, requireAdminRole, (req, res) => {
 app.post('/api/documents/:id/sources', requireUser, upload.array('file', 20), async (req, res) => {
   const doc = store.get(req.params.id);
   if (!doc || doc.status !== 'draft') return res.status(400).json({ error: 'Only drafts can be changed' });
-  if (!req.files?.length) return res.status(400).json({ error: 'Choose at least one PDF' });
+  if (!req.files?.length) return res.status(400).json({ error: 'Choose at least one file' });
   const added = [];
-  for (const f of req.files) {
-    const pdf = await loadPdf(f.buffer);
+  for (const p of await uploadsToPdfs(req.files)) {
+    const pdf = await loadPdf(p.pdf);
     const sid = id(6);
     const file = `${id(9)}-src.pdf`;
-    fs.writeFileSync(filePath(file), f.buffer);
-    doc.sources = { ...(doc.sources || {}), [sid]: { file, name: f.originalname, pages: pdf.getPageCount() } };
-    added.push({ id: sid, name: f.originalname, pages: pdf.getPageCount() });
+    fs.writeFileSync(filePath(file), p.pdf);
+    doc.sources = { ...(doc.sources || {}), [sid]: { file, name: p.name, pages: pdf.getPageCount() } };
+    if (p.from !== 'pdf') log(doc, `Converted to PDF: ${p.name} (${CONVERTED_FROM[p.from]})`, req, 'pages', `SHA-256 of the uploaded file: ${p.hash}`);
+    added.push({ id: sid, name: p.name, pages: pdf.getPageCount() });
   }
   store.save();
   res.json(added);

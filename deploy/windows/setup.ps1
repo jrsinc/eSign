@@ -1,6 +1,7 @@
 # Method 365: set up (or repair) a Windows production server PC.
 # Run in PowerShell opened as administrator. Safe to run again: it installs only what is missing.
-#   1. Installs Node.js LTS, Git, NSSM (runs Method 365 as a Windows service) and cloudflared.
+#   1. Installs Node.js LTS, Git, NSSM (runs Method 365 as a Windows service), cloudflared and LibreOffice
+#      (turns uploaded Word, Excel and PowerPoint files into PDF).
 #   2. Downloads the code to C:\Method365 (or updates it) and installs its packages.
 #   3. Stops and tells you if .env or the data folder still needs copying in.
 #   4. Installs the "Method365" Windows service: starts with Windows, restarts itself if it stops.
@@ -28,15 +29,18 @@ $tools = @(
   @{ Id = 'OpenJS.NodeJS.LTS'; Command = 'node' },
   @{ Id = 'Git.Git'; Command = 'git' },
   @{ Id = 'NSSM.NSSM'; Command = 'nssm' },
-  @{ Id = 'Cloudflare.cloudflared'; Command = 'cloudflared' }
+  @{ Id = 'Cloudflare.cloudflared'; Command = 'cloudflared' },
+  # Turns uploaded Word, Excel and PowerPoint files into PDF. Not on the PATH, so found by its folder.
+  @{ Id = 'TheDocumentFoundation.LibreOffice'; Command = 'LibreOffice'; Path = "$env:ProgramFiles\LibreOffice\program\soffice.exe" }
 )
+function Has-Tool($t) { if ($t.Path) { Test-Path $t.Path } else { [bool](Get-Command $t.Command -ErrorAction SilentlyContinue) } }
 foreach ($t in $tools) {
   Refresh-Path
-  if (Get-Command $t.Command -ErrorAction SilentlyContinue) { Done "$($t.Command) is installed"; continue }
+  if (Has-Tool $t) { Done "$($t.Command) is installed"; continue }
   Write-Host "    installing $($t.Id) ..."
   winget install --id $t.Id --exact --source winget --silent --accept-package-agreements --accept-source-agreements | Out-Null
   Refresh-Path
-  if (-not (Get-Command $t.Command -ErrorAction SilentlyContinue)) { Stop-With "$($t.Id) did not install. Install it by hand, then run this script again." }
+  if (-not (Has-Tool $t)) { Stop-With "$($t.Id) did not install. Install it by hand, then run this script again." }
   Done "$($t.Command) installed"
 }
 Done "Node.js $(node -v), $(git --version)"

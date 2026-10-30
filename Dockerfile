@@ -7,6 +7,9 @@ ENV NODE_ENV=production \
     BACKUP_DIR=/app/backups
 
 WORKDIR /app
+# LibreOffice turns uploaded Word, Excel and PowerPoint files into PDF (images need nothing extra).
+RUN apt-get update && apt-get install -y --no-install-recommends libreoffice-writer libreoffice-calc libreoffice-impress fonts-liberation fonts-dejavu-core \
+    && rm -rf /var/lib/apt/lists/*
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev && npm cache clean --force
 
