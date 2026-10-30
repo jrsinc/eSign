@@ -914,12 +914,18 @@ const git = (...args) => execFileSync('git', args, { cwd: __dirname, encoding: '
 const npmCi = () => execFileSync(process.platform === 'win32' ? 'npm.cmd' : 'npm', ['ci', '--omit=dev'], { cwd: __dirname, encoding: 'utf8', timeout: 600000, stdio: ['ignore', 'pipe', 'pipe'], shell: process.platform === 'win32' });
 let restarting = false;
 
-// The page only needs the start time, to tell when a restart has finished.
-app.get('/api/server', requireUser, requireSystemAdmin, (req, res) => res.json({ startedAt: STARTED_AT }));
+// The page needs the start time, to tell when a restart has finished, and whether erasing is allowed.
+app.get('/api/server', requireUser, requireSystemAdmin, (req, res) => res.json({ startedAt: STARTED_AT, eraseAllowed: !PRODUCTION }));
 
 app.post('/api/server/restart', requireUser, requireSystemAdmin, (req, res) => {
   const mode = req.body.mode === 'erase' ? 'erase' : 'update';
   if (!authLib.verifyPassword(String(req.body.password || ''), req.user.passwordHash)) return res.status(403).json({ error: 'Your password is not correct.' });
+  // GMP records must be kept for their retention period (21 CFR 211.180), so a production server never
+  // erases its data; that is only for test servers.
+  if (mode === 'erase' && PRODUCTION) {
+    sysLog(req, 'server', `Erasing all data refused: ${req.user.name} tried it on a production server`);
+    return res.status(403).json({ error: 'Erasing all data is turned off on a production server, because its records must be kept (21 CFR 211.180). Use it only on a test server.' });
+  }
   if (mode === 'erase' && req.body.confirm !== 'ERASE') return res.status(400).json({ error: 'Type ERASE to confirm that all data will be deleted.' });
   if (restarting) return res.status(409).json({ error: 'A restart is already under way.' });
   restarting = true;
@@ -1147,7 +1153,7 @@ app.put('/api/documents/:id', requireUser, (req, res) => {
   const doc = store.get(req.params.id);
   if (!doc) return res.status(404).json({ error: 'Not found' });
   if (doc.status !== 'draft') return res.status(400).json({ error: 'Only drafts can be edited' });
-  const { title, message, emailSubject, signingOrder, reminder, requireReason, stampPage, signers, fields } = req.body;
+  const { title, message, emailSubject, signingOrder, reminder, stampPage, signers, fields } = req.body;
   const before = JSON.parse(JSON.stringify({ ...doc, events: undefined, comments: undefined }));
   if (typeof stampPage === 'boolean') doc.stampPage = stampPage;
   if (typeof req.body.digitalSign === 'boolean') doc.digitalSign = req.body.digitalSign;
@@ -1156,7 +1162,6 @@ app.put('/api/documents/:id', requireUser, (req, res) => {
   if (typeof emailSubject === 'string') doc.emailSubject = emailSubject.slice(0, 200);
   if (signingOrder === 'parallel' || signingOrder === 'sequential') doc.signingOrder = signingOrder;
   if (reminder in REMINDERS) doc.reminder = reminder;
-  if (typeof requireReason === 'boolean') doc.requireReason = requireReason;
   if (Array.isArray(signers)) {
     doc.signers = signers.slice(0, 20).map((s, i) => ({
       id: typeof s.id === 'string' && s.id ? s.id : id(6),
@@ -1186,7 +1191,7 @@ function describeDraftChanges(a, b) {
   const settings = [
     ['title', (v) => `agreement name set to "${v}"`], ['emailSubject', () => 'email subject changed'], ['message', () => 'email message changed'],
     ['signingOrder', (v) => `signing order set to ${v === 'sequential' ? 'one after another' : 'everyone at once'}`],
-    ['reminder', (v) => `reminders set to ${v}`], ['requireReason', (v) => `reason for signing ${v === false ? 'not required' : 'required'}`],
+    ['reminder', (v) => `reminders set to ${v}`],
     ['stampPage', (v) => `signature page ${v === false ? 'off' : 'on'}`], ['digitalSign', (v) => `digital signing ${v === false ? 'off' : 'on'}`],
   ];
   for (const [k, msg] of settings) if (JSON.stringify(a[k]) !== JSON.stringify(b[k])) out.push(msg(b[k]));
@@ -1769,7 +1774,7 @@ app.get('/api/sign/:token', async (req, res) => {
     cancelReason: doc.cancelReason,
     message: doc.message,
     status: doc.status,
-    requireReason: doc.requireReason !== false,
+    requireReason: true,
     reasons: REASONS,
     signer: { name: signer.name, email: signer.email, status: signer.status, color: signer.color },
     auth: {
@@ -1857,6 +1862,64 @@ app.post('/api/sign/:token/request-account', async (req, res) => {
     }).catch((e) => console.error('Mail error:', e.message));
   }
   res.json({ ok: true, caseNo: ticket.caseNo });
+});
+
+// All have signed: build the signed PDF, store it and send it to everyone. If building it fails, the
+// signatures are kept, the agreement stays "out for signature" with the failure in its audit trail, the
+// sender and administrators are told, and an administrator can retry (it is also retried when the
+// server starts). Returns true when completed.
+async function completeAgreement(doc, retriedBy) {
+  if (retriedBy) log(doc, `Completing the agreement again (retry by ${retriedBy})`, null, 'info');
+  let bytes;
+  let plain;
+  try {
+    doc.completedAt = now();
+    ({ bytes, plain } = await buildFinalPdf(doc));
+  } catch (e) {
+    console.error(`Completing ${doc.agreementId} failed:`, e);
+    delete doc.completedAt;
+    doc.completionError = e.message;
+    log(doc, `The signed PDF could not be made (${e.message}). All signatures are kept; the agreement is completed when an administrator retries.`, null, 'failed');
+    store.save();
+    sysLog(null, 'server', `Completing agreement ${doc.agreementId} failed: ${e.message}`, 'All signatures are kept. Retry from the agreement page.');
+    const admins = store.users().filter((u) => u.role === 'admin' && u.status === 'active').map((u) => u.email);
+    for (const to of new Set([doc.senderEmail, ...admins].filter(Boolean))) {
+      mailer.send({ to, subject: `Action needed: "${doc.title}" [${doc.agreementId}] could not be completed`, heading: 'The signed PDF could not be made',
+        text: `Everyone has signed agreement ${doc.agreementId} "${doc.title}", but the signed PDF could not be made:\n${e.message}\n\nAll signatures are kept. An administrator can open the agreement and click Retry completion.`,
+        link: `${BASE_URL}/#/doc/${doc.id}`, linkLabel: 'OPEN AGREEMENT' }).catch((err) => console.error('Mail error:', err.message));
+    }
+    return false;
+  }
+  delete doc.completionError;
+  doc.status = 'completed';
+  doc.finalFile = `${id(9)}-signed.pdf`;
+  doc.finalHash = sha256(bytes);
+  doc.protected = true;
+  fs.writeFileSync(filePath(doc.finalFile), bytes);
+  fs.chmodSync(filePath(doc.finalFile), 0o444); // the signed original is never modified again
+  // Unencrypted copy, kept on the server only, for making stamped print copies.
+  doc.plainFile = `${id(9)}-plain.pdf`;
+  fs.writeFileSync(filePath(doc.plainFile), plain);
+  store.save();
+  const attachments = [{ filename: `${doc.title.replace(/[^\w.\- ]/g, '_')} - signed.pdf`, content: bytes }];
+  for (const s of doc.signers) {
+    await mailer
+      .send({ to: s.email, subject: `Completed: "${doc.title}" [${doc.agreementId}]`, heading: 'Your agreement has been completed', text: `All parties have signed "${doc.title}".\nAgreement ID: ${doc.agreementId}\n\nThe signed copy is attached to this email. Please keep it for your records.`, attachments })
+      .catch((e) => console.error('Mail error:', e.message));
+  }
+  await notifySender(`Completed: "${doc.title}" [${doc.agreementId}]`, `All parties have signed agreement ${doc.agreementId} "${doc.title}". The signed copy with its audit report is attached.`, attachments, doc);
+  return true;
+}
+// Everyone signed but the agreement isn't completed (an earlier attempt failed).
+const awaitingCompletion = (doc) => doc.status === 'sent' && doc.signers.length > 0 && doc.signers.every((s) => s.status === 'signed');
+
+app.post('/api/documents/:id/complete', requireUser, requireAdminRole, async (req, res) => {
+  const doc = store.get(req.params.id);
+  if (!awaitingCompletion(doc)) return res.status(400).json({ error: 'This agreement is not waiting to be completed.' });
+  sysLog(req, 'server', `Completion of ${doc.agreementId} retried by ${req.user.name}`);
+  const done = await completeAgreement(doc, actorOf(req.user));
+  if (!done) return res.status(500).json({ error: `The signed PDF still could not be made: ${doc.completionError}` });
+  res.json(adminView(doc, req));
 });
 
 // Issues each signer's certificate (logged first, so the audit report lists it), then builds the
@@ -2022,7 +2085,8 @@ app.post('/api/sign/:token', async (req, res) => {
   if (!idn) return;
   if (req.body.consent !== true) return res.status(400).json({ error: 'You must agree to sign electronically.' });
   const reason = String(req.body.reason || '').trim().slice(0, 300);
-  if (doc.requireReason !== false && !reason) return res.status(400).json({ error: 'Please give a reason for signing.' });
+  // Every signature states its meaning (21 CFR 11.50; who did or checked what under 211.186/188/194).
+  if (!reason) return res.status(400).json({ error: 'Please give a reason for signing.' });
 
   const signedAt = new Date();
   const tz = validTz(String(req.body.tz || 'UTC'));
@@ -2092,25 +2156,7 @@ app.post('/api/sign/:token', async (req, res) => {
     `Signature Date: ${auditStamp(signer.signedAt)} - Time Source: server- IP address: ${signer.ip} - Device: ${deviceOf(signer.userAgent)} - Consent: Electronic Record and Signature Disclosure v${POLICY_VERSION} - Identity: signer email matches invited email - Authentication: ${authText} - Signature Appearance Selected: ${appearance}${reason ? ` - Reason: ${reason}` : ''}`);
 
   if (doc.signers.every((s) => s.status === 'signed')) {
-    doc.completedAt = now();
-    const { bytes, plain } = await buildFinalPdf(doc);
-    doc.status = 'completed';
-    doc.finalFile = `${id(9)}-signed.pdf`;
-    doc.finalHash = sha256(bytes);
-    doc.protected = true;
-    fs.writeFileSync(filePath(doc.finalFile), bytes);
-    fs.chmodSync(filePath(doc.finalFile), 0o444); // the signed original is never modified again
-    // Unencrypted copy, kept on the server only, for making stamped print copies.
-    doc.plainFile = `${id(9)}-plain.pdf`;
-    fs.writeFileSync(filePath(doc.plainFile), plain);
-    store.save();
-    const attachments = [{ filename: `${doc.title.replace(/[^\w.\- ]/g, '_')} - signed.pdf`, content: bytes }];
-    for (const s of doc.signers) {
-      await mailer
-        .send({ to: s.email, subject: `Completed: "${doc.title}" [${doc.agreementId}]`, heading: 'Your agreement has been completed', text: `All parties have signed "${doc.title}".\nAgreement ID: ${doc.agreementId}\n\nThe signed copy is attached to this email. Please keep it for your records.`, attachments })
-        .catch((e) => console.error('Mail error:', e.message));
-    }
-    await notifySender(`Completed: "${doc.title}" [${doc.agreementId}]`, `All parties have signed agreement ${doc.agreementId} "${doc.title}". The signed copy with its audit report is attached.`, attachments, doc);
+    await completeAgreement(doc);
   } else {
     store.save();
     const next = activeSigners(doc);
@@ -2183,6 +2229,13 @@ const server = app.listen(PORT, () => {
   console.log(`${APP_NAME} (${COMPANY}) running at ${BASE_URL}  (email ${mailer.enabled() ? 'ON' : 'OFF - links print here'}${PRODUCTION ? ', production' : ''})`);
   setTimeout(() => sendDueReminders().catch((e) => console.error('Reminder error:', e)), 60 * 1000);
   setInterval(backupTick, 60 * 1000);
+  // Agreements everyone signed whose signed PDF couldn't be made earlier are completed now.
+  setTimeout(async () => {
+    for (const doc of store.all().filter(awaitingCompletion)) {
+      console.log(`Completing ${doc.agreementId}, which everyone has signed`);
+      await completeAgreement(doc, 'the server, at start-up').catch((e) => console.error(e));
+    }
+  }, 3000);
   const sch = backupSchedule();
   if (sch.frequency !== 'off') console.log(`Automatic backups (${sch.frequency}) to ${BACKUP_DIR}, next ${nextBackupAt(sch)}`);
 });

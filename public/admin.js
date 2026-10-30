@@ -819,7 +819,7 @@ async function showOutsideSigners() {
 // ---------------- Server restart (system administrator only) ----------------
 // Both kinds save a backup first. The server restarts by stopping; the Windows service starts it again.
 async function showServer() {
-  // Only the start time is needed: it tells when the restart has finished.
+  // The start time tells when the restart has finished. Production servers can't erase their records.
   const info = await api('/api/server');
   app.innerHTML = `
     <div class="wrap" style="max-width:820px">
@@ -831,7 +831,12 @@ async function showServer() {
         <input id="rsPw1" type="password" autocomplete="current-password">
         <div class="row end" style="margin-top:10px"><button class="primary" id="restart1">Back up, update and restart</button></div>
       </div>
-      <div class="card" style="border-color:#fecaca">
+      ${info.eraseAllowed ? '' : `
+      <div class="card">
+        <h2>2. Erase all data</h2>
+        <p class="small muted">Turned off: this is a production server, and its signed records must be kept for their retention period (21 CFR 211.180). Erasing is available only on test servers.</p>
+      </div>`}
+      <div class="card ${info.eraseAllowed ? '' : 'hidden'}" style="border-color:#fecaca">
         <h2 style="color:var(--danger)">2. Erase all data, update and restart</h2>
         <p class="small muted">Saves a backup, then <strong>deletes everything</strong>: all agreements and their PDFs, users (including you), companies, tickets, saved signatures, signing keys and logs. Then gets the newest code and restarts empty, with the first-time setup page (it needs the setup password, ADMIN_PASSWORD in the server's .env). To undo it, restore the backup it saved.</p>
         <label for="rsPw2">Your password, to confirm</label>
@@ -1161,7 +1166,7 @@ function showEditor(doc) {
         method: 'PUT',
         body: {
           title: doc.title, message: doc.message, emailSubject: doc.emailSubject, signingOrder: doc.signingOrder,
-          reminder: doc.reminder, requireReason: doc.requireReason !== false, stampPage: doc.stampPage !== false, digitalSign: doc.digitalSign !== false, signers: doc.signers, fields: doc.fields,
+          reminder: doc.reminder, stampPage: doc.stampPage !== false, digitalSign: doc.digitalSign !== false, signers: doc.signers, fields: doc.fields,
         },
       });
       $('#saveState').textContent = 'All changes saved';
@@ -1224,7 +1229,7 @@ function showEditor(doc) {
         <label for="reminder">Send reminder</label>
         <select id="reminder">${Object.entries(REMINDER_LABELS).map(([k, v]) => `<option value="${k}">${v}</option>`).join('')}</select>`) +
       section('settings', 'SETTINGS', `
-        <label class="check"><input type="checkbox" id="reqReason"> Ask signers for a reason when they sign</label>
+        <p class="small muted" style="margin:4px 0 8px">Signers always give a reason (the meaning of their signature), as 21 CFR Part 11 requires.</p>
         <p class="small muted">The reason appears under each signature and in the audit report.</p>
         <label class="check"><input type="checkbox" id="stampPage"> Add a signature page for every signer</label>
         <p class="small muted">After the document: each signer's signature, email, title and company.</p>
@@ -1246,8 +1251,6 @@ function showEditor(doc) {
     $('#order').onchange = (e) => { doc.signingOrder = e.target.value; scheduleSave(); };
     $('#reminder').value = doc.reminder || 'none';
     $('#reminder').onchange = (e) => { doc.reminder = e.target.value; scheduleSave(); };
-    $('#reqReason').checked = doc.requireReason !== false;
-    $('#reqReason').onchange = (e) => { doc.requireReason = e.target.checked; scheduleSave(); };
     $('#stampPage').checked = doc.stampPage !== false;
     $('#stampPage').onchange = (e) => { doc.stampPage = e.target.checked; scheduleSave(); };
     $('#digitalSign').checked = doc.digitalSign !== false;
@@ -1990,6 +1993,12 @@ function showDetail(doc) {
           <p class="small muted" style="margin:10px 0 0">Transaction ID: ${esc(doc.transactionId || doc.id)}<br>Sent ${when(doc.sentAt)}${done ? `<br>Completed ${when(doc.completedAt)}` : ''}
           ${doc.status === 'voided' ? `<br>Cancelled ${when(doc.cancelledAt)}${doc.cancelReason ? `<br>Reason: ${esc(doc.cancelReason)}` : ''}` : ''}
           ${doc.status === 'sent' ? `<br>Reminders: ${REMINDER_LABELS[doc.reminder || 'none']}` : ''}</p>
+          ${doc.status === 'sent' && doc.signers.length && doc.signers.every((s) => s.status === 'signed') ? `
+          <div class="identity" style="border-color:#fde68a;background:#fffbeb">
+            <strong>Everyone has signed, but the signed PDF couldn't be made yet.</strong>
+            <p class="small muted" style="margin:4px 0 8px">${doc.completionError ? `Reason: ${esc(doc.completionError)}. ` : ''}All signatures are kept.${me.user.role === 'admin' ? '' : ' An administrator can complete it.'}</p>
+            ${me.user.role === 'admin' ? '<button class="primary" id="retryComplete">Retry completion</button>' : ''}
+          </div>` : ''}
           ${done && doc.locked ? `<div class="locked">🔒 <strong>Locked.</strong> Certified by ${esc(me.company)} ${esc(me.app)}: no changes allowed. Any edit breaks the signatures.${doc.protected ? ' The PDF can be printed, but its text can\'t be copied or edited.' : ''}</div>` : ''}
           ${doc.access === 'recipient' ? `<p class="small muted">Sent to you by ${esc(doc.senderName || 'the sender')}. ${doc.status === 'sent' ? 'Use the signing link in your email to sign.' : ''}</p>` : ''}
           ${done ? `<p class="small muted" style="word-break:break-all">Signed file SHA-256:<br>${doc.finalHash}</p>` : ''}
@@ -2061,6 +2070,21 @@ function showDetail(doc) {
     } catch (e) { toast(e.message); }
   }));
   $('#voidBtn') && ($('#voidBtn').onclick = () => cancelAgreement(doc));
+  $('#retryComplete') && ($('#retryComplete').onclick = async () => {
+    $('#retryComplete').disabled = true;
+    toast('Making the signed PDF…', 20000);
+    const busy = [...document.querySelectorAll('.toast')].pop();
+    try {
+      const updated = await api(`/api/documents/${doc.id}/complete`, { method: 'POST' });
+      busy?.remove();
+      toast('Agreement completed; the signed PDF was emailed to everyone', 5000);
+      showDetail(updated);
+    } catch (e) {
+      busy?.remove();
+      $('#retryComplete').disabled = false;
+      toast(e.message, 8000);
+    }
+  });
 
   renderPdf(done ? `/api/documents/${doc.id}/signed` : `/api/documents/${doc.id}/original`, $('#pages')).then((pages) => {
     if (done) return;

@@ -53,7 +53,8 @@ const PNG = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJA
   ok((await ravi('/api/server')).status === 403, 'another administrator can\'t open the server page');
   ok((await ravi('/api/server/restart', { mode: 'update', password: gen.data.password })).status === 403, 'another administrator can\'t restart the server, even with full access');
   ok((await ravi('/api/server/restart', { mode: 'erase', password: gen.data.password, confirm: 'ERASE' })).status === 403, 'another administrator can\'t erase data');
-  ok((await admin('/api/server')).status === 200, 'the system administrator sees the server page');
+  const srv = await admin('/api/server');
+  ok(srv.status === 200 && srv.data.eraseAllowed === true, 'the system administrator sees the server page; erasing is allowed on a test server');
   ok((await admin('/api/server/restart', { mode: 'update', password: 'wrong-password-1' })).status === 403, 'restart needs the system administrator\'s password');
   ok((await admin('/api/server/restart', { mode: 'erase', password: 'Strong-pass-2026', confirm: 'erase' })).status === 400, 'erasing needs ERASE typed exactly');
   const users = (await ravi('/api/users')).data;
@@ -69,14 +70,16 @@ const PNG = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJA
   fd.append('file', new Blob([Buffer.from(await src.save())]), 'Outside test.pdf');
   const doc = (await admin('/api/documents', fd)).data;
   await admin(`/api/documents/${doc.id}`, {
-    signers: [{ id: 'o', name: 'Olga Outside', email: 'olga@outside.test' }], signingOrder: 'parallel', requireReason: true,
+    // Asking for no reason is ignored: every signature states its meaning.
+    signers: [{ id: 'o', name: 'Olga Outside', email: 'olga@outside.test' }], signingOrder: 'parallel', requireReason: false,
     fields: [0, 1, 2].map((i) => ({ id: `f${i}`, signerId: 'o', type: 'signature', page: 0, x: 0.1, y: 0.2 + i * 0.2, w: 0.3, h: 0.07 })),
   }, false, 'PUT');
   const sent = (await admin(`/api/documents/${doc.id}/send`, {})).data;
   const token = sent.signers[0].link.split('t=')[1];
   const olga = client();
-  await olga(`/api/sign/${token}`);
+  ok((await olga(`/api/sign/${token}`)).data.requireReason === true, 'the signing page always asks for a reason, even if the sender tried to turn it off');
   await sleep(200);
+  ok((await olga(`/api/sign/${token}`, { consent: true, values: { f0: PNG, f1: PNG, f2: PNG }, tz: 'UTC', password: tempFor('olga@outside.test') })).status === 400, 'signing without a reason is refused');
   ok((await olga(`/api/sign/${token}`, { consent: true, values: { f0: PNG, f1: PNG }, reason: 'I approve this document', tz: 'UTC', password: tempFor('olga@outside.test') })).status === 400, 'every signature place must be signed (one left empty is refused)');
   ok((await olga(`/api/sign/${token}`, { consent: true, values: { f0: PNG, f1: PNG, f2: PNG }, reason: 'I approve this document', tz: 'UTC', password: 'wrong-temp-1' })).status === 401, 'wrong temporary password refused');
   const signed = await olga(`/api/sign/${token}`, { consent: true, values: { f0: PNG, f1: PNG, f2: PNG }, reason: 'I approve this document', tz: 'UTC', password: tempFor('olga@outside.test') });

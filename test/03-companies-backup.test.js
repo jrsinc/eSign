@@ -62,7 +62,7 @@ const fileForm = (buf, extra = {}) => {
   await admin(`/api/documents/${doc.id}`, { signers: [{ id: 's', name: 'Signer One', email: 'signer@test.local' }], fields: [
     { id: 'f', signerId: 's', type: 'signature', page: 0, x: 0.1, y: 0.3, w: 0.3, h: 0.07 },
     { id: 'c', signerId: 's', type: 'company', page: 0, x: 0.1, y: 0.5, w: 0.3, h: 0.04, required: true },
-  ], requireReason: false }, false, 'PUT');
+  ] }, false, 'PUT');
   const sent = (await admin(`/api/documents/${doc.id}/send`, {})).data;
   const token = sent.signers[0].link.split('t=')[1];
   const info = (await client()(`/api/sign/${token}`)).data;
@@ -70,7 +70,7 @@ const fileForm = (buf, extra = {}) => {
   const PNG = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==';
   await sleep(200);
   const temp = (/Temporary password: (\S+)/.exec(mails('signer@test.local').filter((m) => m.includes('Temporary password:')).pop() || '') || [])[1];
-  const sg = await client()(`/api/sign/${token}`, { consent: true, values: { f: PNG, c: 'Acme Labs (typed)' }, tz: 'UTC', password: temp });
+  const sg = await client()(`/api/sign/${token}`, { consent: true, values: { f: PNG, c: 'Acme Labs (typed)' }, reason: 'I approve this document', tz: 'UTC', password: temp });
   const signedDoc = (await admin(`/api/documents/${doc.id}`)).data;
   ok(sg.status === 200 && signedDoc.signers[0].company === 'Acme Labs (typed)', 'a company typed with "Other" is saved with the signature');
 
