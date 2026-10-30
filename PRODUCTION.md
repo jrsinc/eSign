@@ -168,7 +168,9 @@ Keep the backup file private: it contains every document and the keys that sign 
 
 ## 8. Backups
 
-- `AUTO_BACKUP_HOURS=24` writes a backup every day to the backups folder, keeping the newest `BACKUP_KEEP` (14).
+- Production servers back up **daily at 02:00** to the backups folder. Administrators change the schedule
+  (off, every few hours, daily, weekly; how many to keep) under **Admin ▾ → Backup and restore**, where every
+  backup on the server is listed to download, with a backup log.
 - **Copy backups off the server** too (another site or cloud storage), for example daily:
   - Docker: `docker run --rm -v esign_esign-backups:/b -v /srv/offsite:/out alpine sh -c "cp /b/*.esbackup /out/"`
   - Linux: `rsync -a /opt/esign/backups/ backup-host:/esign-backups/`

@@ -6,10 +6,11 @@ let me = null;
 const rid = () => Math.random().toString(36).slice(2, 10);
 const REMINDER_LABELS = { none: 'Never', daily: 'Every day', every2days: 'Every 2 days', weekly: 'Every week' };
 
-// Coming from a signing link that needs an account: after sign-in, go straight back to it.
-// Only this site's signing page is accepted, so the link can't send anyone elsewhere.
+// Coming from a signing link that needs an account, or from "Log in to view" after signing: after
+// sign-in, go straight there. Only this site's signing page or an agreement page is accepted, so the
+// link can't send anyone elsewhere.
 const params = new URLSearchParams(location.search);
-const nextUrl = /^\/sign\.html\?t=[\w-]+$/.test(params.get('next') || '') ? params.get('next') : null;
+const nextUrl = /^\/(sign\.html\?t=[\w-]+|#\/doc\/[\w-]+)$/.test(params.get('next') || '') ? params.get('next') : null;
 
 let watcher = null;
 async function boot() {
@@ -21,6 +22,7 @@ async function boot() {
     $('#nav').classList.remove('hidden');
     $('#logout').classList.remove('hidden');
     $('#adminMenu').classList.toggle('hidden', me.user.role !== 'admin');
+    $('#serverMenu').classList.toggle('hidden', !me.user.systemAdmin);
     refreshTicketCount();
     $('#account').classList.remove('hidden');
     $('#account').textContent = `👤 ${me.user.name}`;
@@ -55,7 +57,7 @@ async function showLogin(notice = '') {
     <div class="center-box card">
       <h1>Sign in</h1>
       <p class="muted">${esc(status.app)} for ${esc(status.companyFull || status.company)}. Use your own email address and password.</p>
-      ${nextUrl ? '<p class="small identity">Sign in with the email the document was sent to. You\'ll go straight back to the document.</p>' : ''}
+      ${nextUrl ? `<p class="small identity">${nextUrl.startsWith('/#/doc/') ? 'Sign in to view your signed agreement.' : 'Sign in with the email the document was sent to. You\'ll go straight back to the document.'}</p>` : ''}
       ${notice ? `<p class="small" style="color:var(--warn)">${esc(notice)}</p>` : ''}
       <form id="loginForm">
         <label for="email">Email</label>
@@ -250,6 +252,8 @@ function route() {
   if (m) openDoc(m[1]);
   else if (location.hash === '#/system-log' && me.user.role === 'admin') showSystemLog();
   else if (location.hash === '#/users' && me.user.role === 'admin') showUsers();
+  else if (location.hash === '#/outside-signers' && me.user.role === 'admin') showOutsideSigners();
+  else if (location.hash === '#/server' && me.user.systemAdmin) showServer();
   else if (location.hash === '#/companies' && me.user.role === 'admin') showCompanies();
   else if (location.hash === '#/backup' && me.user.role === 'admin') showBackup();
   else if (location.hash === '#/tickets' && me.user.role === 'admin') showTickets();
@@ -281,7 +285,7 @@ async function showTickets() {
     <div class="wrap" style="max-width:1100px">
       <div class="card" style="margin-bottom:16px">
         <h1>Support tickets</h1>
-        <p class="muted small">Raised from the sign-in page when a sign-in code doesn't arrive or someone forgot their password. Fix the problem on the <a href="#/users">Users</a> page (correct the email, unlock, or set a new password), then resolve the ticket with a note: the person is emailed. ${open.length} open.</p>
+        <p class="muted small">Raised from the sign-in page when a sign-in code doesn't arrive or someone forgot their password, and by outside signers who ask for an account after signing. Fix the problem on the <a href="#/users">Users</a> page (correct the email, unlock, set a new password, or click <strong>Create account</strong>), then resolve the ticket with a note: the person is emailed. Creating the account resolves an account request by itself. ${open.length} open.</p>
       </div>
       <div class="card" style="padding:0;overflow-x:auto">
         <table>
@@ -293,14 +297,18 @@ async function showTickets() {
               <td class="small">${t.name ? `<strong>${esc(t.name)}</strong><br>` : ''}${esc(t.email)}<br>${accountState(t)}</td>
               <td class="small">${esc(t.kindLabel)}${t.message ? `<br><span class="muted">"${esc(t.message)}"</span>` : ''}<br><span class="muted">${esc(t.ip || '')} · ${esc(t.device || '')}</span></td>
               <td class="small">${t.status === 'open' ? '<span class="badge sent">open</span>' : `<span class="badge completed">resolved</span><br><span class="muted">${when(t.resolvedAt)} by ${esc(t.resolvedBy)}<br>${esc(t.resolution)}</span>`}</td>
-              <td style="white-space:nowrap">${t.status === 'open' ? '<button class="primary small" data-resolve>Resolve</button>' : ''}</td>
+              <td style="white-space:nowrap">${t.status === 'open' ? `${t.kind === 'account' && !t.account ? '<button class="small" data-create>Create account</button> ' : ''}<button class="primary small" data-resolve>Resolve</button>` : ''}</td>
             </tr>`).join('') : '<tr><td colspan="6" class="muted" style="text-align:center;padding:24px">No support tickets.</td></tr>'}</tbody>
         </table>
       </div>
     </div>`;
+  app.querySelectorAll('[data-create]').forEach((b) => (b.onclick = () => {
+    const t = tickets.find((x) => x.id === b.closest('tr').dataset.id);
+    createAccountFor(t.name, t.email);
+  }));
   app.querySelectorAll('[data-resolve]').forEach((b) => (b.onclick = async () => {
     const t = tickets.find((x) => x.id === b.closest('tr').dataset.id);
-    const note = prompt(`Resolve ${t.caseNo} for ${t.email}.\n\nWhat was done? (emailed to the person and kept in the system log)`, t.kind === 'code' ? 'Email address corrected; please sign in again.' : 'New password set; I will give it to you privately.');
+    const note = prompt(`Resolve ${t.caseNo} for ${t.email}.\n\nWhat was done? (emailed to the person and kept in the system log)`, { code: 'Email address corrected; please sign in again.', password: 'New password set; I will give it to you privately.', account: 'No account needed: please keep signing with the temporary password emailed to you.' }[t.kind] || '');
     if (note === null) return;
     try {
       await api(`/api/tickets/${t.id}/resolve`, { method: 'POST', body: { note } });
@@ -489,12 +497,48 @@ async function showCompanies() {
 
 // ---------------- Backup and restore (administrators) ----------------
 async function showBackup() {
+  const b = await api('/api/backups');
+  const sch = b.schedule;
+  const days = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+  const mb = (n) => (n < 1048576 ? `${Math.max(1, Math.round(n / 1024))} KB` : `${(n / 1048576).toFixed(1)} MB`);
+  const st = b.state || {};
   app.innerHTML = `
-    <div class="wrap" style="max-width:760px">
+    <div class="wrap" style="max-width:900px">
       <div class="card" style="margin-bottom:16px">
         <h1>Backup</h1>
         <p class="muted small">One file with everything: agreements and their PDFs, users, companies, saved signer details, the certificate keys for digital signatures, and the system log. Keep backups somewhere safe and private: they contain confidential documents and the keys that sign them.</p>
-        <a class="btn primary" href="/api/backup" id="dlBackup">⬇ Download backup</a>
+        <div class="row" style="flex-wrap:wrap"><a class="btn primary" href="/api/backup" id="dlBackup">⬇ Download backup to this computer</a><button id="runBackup">Save a backup on the server now</button></div>
+      </div>
+      <div class="card" style="margin-bottom:16px">
+        <h2>Automatic backups</h2>
+        <p class="muted small">Saved in the backups folder on the server (<code style="word-break:break-all">${esc(b.folder)}</code>) and listed below to download. Times are the server's time (${esc(b.timeZone)}, now ${esc(new Date(b.serverTime).toLocaleString([], { timeZone: b.timeZone, dateStyle: 'medium', timeStyle: 'short' }))}). Only administrators can change this.</p>
+        <div class="row" style="flex-wrap:wrap;align-items:flex-end">
+          <div><label for="bkFreq">How often</label><select id="bkFreq">
+            <option value="off">Off</option><option value="hours">Every few hours</option><option value="daily">Every day</option><option value="weekly">Every week</option></select></div>
+          <div data-for="hours"><label for="bkHours">Every</label><select id="bkHours">${[1, 2, 3, 4, 6, 8, 12].map((h) => `<option value="${h}" ${sch.hours === h ? 'selected' : ''}>${h} hour${h > 1 ? 's' : ''}</option>`).join('')}</select></div>
+          <div data-for="weekly"><label for="bkDay">On</label><select id="bkDay">${days.map((d, i) => `<option value="${i}" ${sch.day === i ? 'selected' : ''}>${d}</option>`).join('')}</select></div>
+          <div data-for="daily weekly"><label for="bkTime">At (server time)</label><input id="bkTime" type="time" value="${esc(sch.time || '02:00')}"></div>
+          <div data-for="hours daily weekly"><label for="bkKeep">Keep the newest</label><input id="bkKeep" type="number" min="1" max="365" value="${sch.keep || 14}" style="width:90px"></div>
+          <button class="primary" id="bkSave">Save schedule</button>
+        </div>
+        <p class="small" style="margin-top:10px">${sch.frequency === 'off' ? '<span class="badge voided">off</span> No automatic backups.' : `<span class="badge completed">on</span> Next backup: <strong>${when(b.nextAt)}</strong>.`}
+          ${st.lastAutoAt ? ` Last automatic backup: ${when(st.lastAutoAt)} ${st.lastResult === 'ok' ? '✓' : `<span style="color:var(--danger)">FAILED: ${esc(st.lastError || '')}</span>`}` : ''}
+          ${sch.updatedBy ? `<br><span class="muted">Schedule set by ${esc(sch.updatedBy)}, ${when(sch.updatedAt)}.</span>` : sch.custom ? '' : '<br><span class="muted">Default schedule (not changed yet).</span>'}</p>
+      </div>
+      <div class="card" style="margin-bottom:16px;padding:0;overflow-x:auto">
+        <h2 style="padding:16px 16px 0">Backups on the server</h2>
+        <table>
+          <thead><tr><th>When</th><th>Type</th><th>File</th><th>Size</th><th></th></tr></thead>
+          <tbody>${b.files.length ? b.files.map((f) => `<tr><td class="small">${when(f.at)}</td><td class="small">${esc(f.kind)}</td><td class="small">${esc(f.name)}</td><td class="small">${mb(f.size)}</td><td><a class="btn small" href="/api/backups/file/${encodeURIComponent(f.name)}">⬇ Download</a></td></tr>`).join('')
+            : '<tr><td colspan="5" class="muted" style="text-align:center;padding:20px">No backups saved on the server yet.</td></tr>'}</tbody>
+        </table>
+      </div>
+      <div class="card" style="margin-bottom:16px">
+        <h2>Backup log</h2>
+        <table>
+          <thead><tr><th>When</th><th>Who</th><th>What</th></tr></thead>
+          <tbody>${b.log.map((e) => `<tr><td class="small">${when(e.at)}</td><td class="small">${esc(e.actor || '')}</td><td class="small">${esc(e.text)}${e.detail ? `<br><span class="muted">${esc(e.detail)}</span>` : ''}</td></tr>`).join('') || '<tr><td colspan="3" class="muted">No backup activity yet.</td></tr>'}</tbody>
+        </table>
       </div>
       <div class="card">
         <h2>Restore from a backup</h2>
@@ -504,7 +548,26 @@ async function showBackup() {
         <div id="rsInfo"></div>
       </div>
     </div>`;
-  $('#dlBackup').onclick = () => setTimeout(() => toast('Backup downloading'), 300);
+  $('#dlBackup').onclick = () => setTimeout(() => { toast('Backup downloading'); setTimeout(showBackup, 1500); }, 300);
+  $('#runBackup').onclick = async () => {
+    $('#runBackup').disabled = true;
+    try {
+      const r = await api('/api/backups/run', { method: 'POST' });
+      toast(`Backup saved: ${r.name}`, 4000);
+      showBackup();
+    } catch (e) { $('#runBackup').disabled = false; toast(e.message, 5000); }
+  };
+  $('#bkFreq').value = sch.frequency;
+  const showFor = () => app.querySelectorAll('[data-for]').forEach((el) => el.classList.toggle('hidden', !el.dataset.for.split(' ').includes($('#bkFreq').value)));
+  $('#bkFreq').onchange = showFor;
+  showFor();
+  $('#bkSave').onclick = async () => {
+    try {
+      await api('/api/backups/schedule', { method: 'PUT', body: { frequency: $('#bkFreq').value, hours: Number($('#bkHours').value), day: Number($('#bkDay').value), time: $('#bkTime').value, keep: Number($('#bkKeep').value) } });
+      toast('Backup schedule saved');
+      showBackup();
+    } catch (e) { toast(e.message, 5000); }
+  };
   $('#rsFile').onchange = async () => {
     const file = $('#rsFile').files[0];
     $('#rsInfo').innerHTML = '';
@@ -562,7 +625,7 @@ async function showUsers(notice = '') {
   app.innerHTML = `
     <div class="wrap" style="max-width:1200px">
       <div class="card" style="margin-bottom:16px">
-        <h1>Users</h1>
+        <div class="row" style="justify-content:space-between;flex-wrap:wrap"><h1 style="margin:0">Users</h1><a class="btn" href="#/outside-signers">👥 Outside signers (temporary password)</a></div>
         <p class="muted small">Only administrators add users and set passwords. When you add someone, we email them their sign-in ID (their email) and password. They sign in with both, plus a code emailed to them each time. Users can't change their own password; they ask you. Users are never deleted, only deactivated, so the audit trail always shows who did what. To give someone every administrator right, set their access to <strong>Administrator (full access)</strong>.</p>
         <form id="addUser">
           <div class="row" style="flex-wrap:wrap;align-items:flex-end">
@@ -585,9 +648,9 @@ async function showUsers(notice = '') {
           <thead><tr><th>Name</th><th>Email</th><th>Access</th><th>Status</th><th>Audit trail access</th><th>Last sign-in</th><th></th></tr></thead>
           <tbody>${users.map((u) => `
             <tr data-id="${u.id}">
-              <td><strong>${esc(u.name)}</strong>${u.id === me.user.id ? ' <span class="small muted">(you)</span>' : ''}</td>
+              <td><strong>${esc(u.name)}</strong>${u.id === me.user.id ? ' <span class="small muted">(you)</span>' : ''}${u.systemAdmin ? '<br><span class="badge completed" title="The only person who can restart the server or erase its data">system administrator</span>' : ''}</td>
               <td class="small">${esc(u.email)}</td>
-              <td><select data-role ${u.id === me.user.id ? 'disabled' : ''}><option value="sender" ${u.role === 'sender' ? 'selected' : ''}>Sender</option><option value="admin" ${u.role === 'admin' ? 'selected' : ''}>Administrator (full access)</option></select></td>
+              <td><select data-role ${u.id === me.user.id || u.systemAdmin ? 'disabled' : ''}><option value="sender" ${u.role === 'sender' ? 'selected' : ''}>Sender</option><option value="admin" ${u.role === 'admin' ? 'selected' : ''}>Administrator (full access)</option></select></td>
               <td>${statusBadge(u)}</td>
               <td class="small">${permBox(u, 'viewAudit', 'View')}${permBox(u, 'downloadAudit', 'Download')}</td>
               <td class="small muted">${u.lastLoginAt ? when(u.lastLoginAt) : '—'}</td>
@@ -595,7 +658,7 @@ async function showUsers(notice = '') {
                 <button class="ghost small" data-edit>Edit</button>
                 <button class="ghost small" data-act="set-password">Set new password</button>
                 ${u.lockedUntil && Date.parse(u.lockedUntil) > Date.now() ? '<button class="ghost small" data-act="unlock">Unlock</button>' : ''}
-                ${u.id === me.user.id ? '' : u.status === 'disabled' ? '<button class="ghost small" data-act="enable">Reactivate</button>' : '<button class="ghost small danger" data-act="disable">Deactivate</button>'}
+                ${u.id === me.user.id || u.systemAdmin ? '' : u.status === 'disabled' ? '<button class="ghost small" data-act="enable">Reactivate</button>' : '<button class="ghost small danger" data-act="disable">Deactivate</button>'}
               </td>
             </tr>`).join('')}</tbody>
         </table>
@@ -611,11 +674,24 @@ async function showUsers(notice = '') {
     </div>`;
   const bindCopy = (password) => $('[data-copy-pw]')?.addEventListener('click', () => navigator.clipboard.writeText(password).then(() => toast('Password copied')));
 
-  $('#genPw').onclick = () => { $('#uPw').value = ''; $('#uPw').placeholder = 'A strong password will be generated'; $('#uPw').dataset.generate = '1'; };
-  $('#uPw').oninput = () => delete $('#uPw').dataset.generate;
+  // Generate fills in a strong password, so the administrator sees it before adding the user.
+  $('#genPw').onclick = async () => {
+    try {
+      $('#uPw').value = (await api('/api/password/generate')).password;
+      toast('Strong password generated');
+    } catch (err) { toast(err.message, 4000); }
+  };
+  if (pendingNewUser) {
+    $('#uName').value = pendingNewUser.name || '';
+    $('#uEmail').value = pendingNewUser.email || '';
+    pendingNewUser = null;
+    $('#genPw').click();
+    $('#addUser').scrollIntoView({ block: 'center' });
+    toast('Check the details, then click Add user');
+  }
   $('#addUser').onsubmit = async (e) => {
     e.preventDefault();
-    const generate = !!$('#uPw').dataset.generate || !$('#uPw').value;
+    const generate = !$('#uPw').value;
     try {
       const r = await api('/api/users', { method: 'POST', body: {
         name: $('#uName').value, email: $('#uEmail').value, role: $('#uRole').value,
@@ -696,6 +772,120 @@ async function showUsers(notice = '') {
       } catch (err) { toast(err.message, 5000); }
     }));
   });
+}
+
+// Opens the Users page with the add-user form filled in (from an account request or an outside signer).
+let pendingNewUser = null;
+function createAccountFor(name, email) {
+  pendingNewUser = { name, email };
+  if (location.hash === '#/users') showUsers();
+  else location.hash = '#/users';
+}
+
+// ---------------- Outside signers (administrators) ----------------
+// People who signed, or were asked to sign, without an account: they use a temporary password emailed
+// for each agreement. An administrator can give any of them an account.
+async function showOutsideSigners() {
+  const people = await api('/api/outside-signers');
+  const badge = (st) => `<span class="badge ${{ signed: 'completed', declined: 'declined', viewed: 'sent', pending: 'draft' }[st] || 'draft'}">${esc(st)}</span>`;
+  app.innerHTML = `
+    <div class="wrap" style="max-width:1200px">
+      <div class="card" style="margin-bottom:16px">
+        <div class="row" style="justify-content:space-between;flex-wrap:wrap"><h1 style="margin:0">Outside signers</h1><a class="btn" href="#/users">← Users</a></div>
+        <p class="muted small">People who sign without an account: each time, a temporary password is emailed to them for that agreement only. Their activity is in each agreement's audit trail and in the <a href="#/system-log">system log</a>. If they asked for an account, the request is also under <a href="#/tickets">Support tickets</a>. Click <strong>Create account</strong> to add them as a user. ${people.length} ${people.length === 1 ? 'person' : 'people'}.</p>
+      </div>
+      <div class="card" style="padding:0;overflow-x:auto">
+        <table>
+          <thead><tr><th>Name</th><th>Email</th><th>Company</th><th>Agreements</th><th>Last activity</th><th>Account request</th><th></th></tr></thead>
+          <tbody>${people.length ? people.map((p, i) => `
+            <tr>
+              <td><strong>${esc(p.name)}</strong></td>
+              <td class="small">${esc(p.email)}</td>
+              <td class="small">${esc(p.company || '—')}</td>
+              <td class="small">${p.agreements.map((a) => `<a href="#/doc/${esc(a.id)}">${esc(a.agreementId || a.title)}</a> ${badge(a.status)}`).join('<br>')}<br><span class="muted">${p.signed} signed of ${p.agreements.length}</span></td>
+              <td class="small muted">${p.lastActivity ? when(p.lastActivity) : '—'}</td>
+              <td class="small">${p.request ? `<span class="badge sent">open</span> <a href="#/tickets">${esc(p.request)}</a>` : p.accountRequestedAt ? `requested ${when(p.accountRequestedAt)}` : '—'}</td>
+              <td><button class="small" data-create="${i}">Create account</button></td>
+            </tr>`).join('') : '<tr><td colspan="7" class="muted" style="text-align:center;padding:24px">No outside signers yet.</td></tr>'}</tbody>
+        </table>
+      </div>
+    </div>`;
+  app.querySelectorAll('[data-create]').forEach((b) => (b.onclick = () => {
+    const p = people[Number(b.dataset.create)];
+    createAccountFor(p.name, p.email);
+  }));
+}
+
+// ---------------- Server restart (system administrator only) ----------------
+// Both kinds save a backup first. The server restarts by stopping; the Windows service starts it again.
+async function showServer() {
+  // Only the start time is needed: it tells when the restart has finished.
+  const info = await api('/api/server');
+  app.innerHTML = `
+    <div class="wrap" style="max-width:820px">
+      <h1>Server restart</h1>
+      <div class="card" style="margin-bottom:16px">
+        <h2>1. Update and restart</h2>
+        <p class="small muted">Saves a backup, gets the newest code from GitHub, checks it and restarts. All data stays. If the update fails, nothing is restarted and the current version keeps running. Everyone stays signed in; pages reconnect within a minute.</p>
+        <label for="rsPw1">Your password, to confirm</label>
+        <input id="rsPw1" type="password" autocomplete="current-password">
+        <div class="row end" style="margin-top:10px"><button class="primary" id="restart1">Back up, update and restart</button></div>
+      </div>
+      <div class="card" style="border-color:#fecaca">
+        <h2 style="color:var(--danger)">2. Erase all data, update and restart</h2>
+        <p class="small muted">Saves a backup, then <strong>deletes everything</strong>: all agreements and their PDFs, users (including you), companies, tickets, saved signatures, signing keys and logs. Then gets the newest code and restarts empty, with the first-time setup page (it needs the setup password, ADMIN_PASSWORD in the server's .env). To undo it, restore the backup it saved.</p>
+        <label for="rsPw2">Your password, to confirm</label>
+        <input id="rsPw2" type="password" autocomplete="current-password">
+        <label for="rsConfirm">Type ERASE to confirm</label>
+        <input id="rsConfirm" autocomplete="off" spellcheck="false">
+        <div class="row end" style="margin-top:10px"><button class="primary danger" id="restart2">Back up, erase all data and restart</button></div>
+      </div>
+    </div>`;
+  const go = async (mode) => {
+    const password = $(mode === 'erase' ? '#rsPw2' : '#rsPw1').value;
+    if (!password) return toast('Please enter your password');
+    if (mode === 'erase') {
+      if ($('#rsConfirm').value !== 'ERASE') return toast('Type ERASE to confirm');
+      if (!confirm('Erase ALL data and restart?\n\nA backup is saved first. Everyone, including you, is removed; the server starts empty.')) return;
+    } else if (!confirm('Back up, update and restart the server now?\n\nThe site is unavailable for about a minute.')) return;
+    app.querySelectorAll('button').forEach((b) => (b.disabled = true));
+    try {
+      const r = await api('/api/server/restart', { method: 'POST', body: { mode, password, confirm: $('#rsConfirm').value } });
+      waitForRestart(r, info.startedAt);
+    } catch (e) {
+      app.querySelectorAll('button').forEach((b) => (b.disabled = false));
+      toast(e.message, 6000);
+    }
+  };
+  $('#restart1').onclick = () => go('update');
+  $('#restart2').onclick = () => go('erase');
+}
+
+// Waits until the server answers again with a new start time, then reloads.
+function waitForRestart(r, startedBefore) {
+  app.innerHTML = `
+    <div class="wrap card" style="max-width:640px">
+      <h1>Restarting…</h1>
+      <ul class="small">${r.steps.map((x) => `<li>${esc(x)}</li>`).join('')}</ul>
+      <p id="rsWait" class="muted">Waiting for the server to start again…</p>
+    </div>`;
+  const t0 = Date.now();
+  const poll = async () => {
+    try {
+      const h = await (await fetch('/healthz', { cache: 'no-store' })).json();
+      if (h.started && h.started !== startedBefore) {
+        $('#rsWait').textContent = 'The server is running again. Reloading…';
+        setTimeout(() => { location.hash = '#/'; location.reload(); }, 1200);
+        return;
+      }
+    } catch {}
+    if (Date.now() - t0 > 3 * 60000) {
+      $('#rsWait').innerHTML = 'The server has not come back after 3 minutes. On the server PC, check the <strong>Method365</strong> service (Services, or <code>nssm status Method365</code>) and its log in <code>logs\\method365.log</code>.';
+      return;
+    }
+    setTimeout(poll, 2000);
+  };
+  setTimeout(poll, 2000);
 }
 
 // Sign-ins, failed logins, discarded drafts and test emails, with the hash-chain check.

@@ -90,12 +90,12 @@ Edit `C:\Method365\.env`:
 
 ```
 NODE_ENV=production
-AUTO_BACKUP_HOURS=24
 BACKUP_DIR=D:\Method365-backups
 ```
 
 - **Delete the line `LOGIN_CODE=off`** so sign-in needs the emailed code again.
 - `BACKUP_DIR`: another disk, or a OneDrive / Google Drive folder so a copy leaves the PC.
+- Automatic backups run **daily at 02:00** in production. Change the schedule (every few hours, daily, weekly, how many to keep) under **Admin → Backup and restore**; every backup is listed there to download, with a backup log.
 - `ADMIN_PASSWORD` must be at least 12 characters in production.
 
 Then restart: `nssm restart Method365`. Production mode refuses to start if anything is unsafe and writes the reason to `C:\Method365\logs\method365.log`.
@@ -107,8 +107,9 @@ Then restart: `nssm restart Method365`. Production mode refuses to start if anyt
 | Is it running? | `nssm status Method365` · or open https://esign.method365sign.com/healthz |
 | Restart (after editing `.env`) | `nssm restart Method365` |
 | Logs | `C:\Method365\logs\method365.log` |
-| Update to the latest version | `C:\Method365\deploy\windows\update.ps1`: backs up data, updates, restarts, and rolls back on its own if the new version is not healthy |
-| Backups | automatic daily (part F); manual: **Admin → Backup and restore** |
+| Update to the latest version | In the app: **Admin → Server restart → Back up, update and restart** (system administrator only). Or on the PC: `C:\Method365\deploy\windows\update.ps1`, which also rolls back on its own if the new version is not healthy |
+| Start again with no data | **Admin → Server restart → Back up, erase all data and restart** (system administrator only; a backup is saved first, then the first-time setup page appears) |
+| Backups | automatic, daily at 02:00 unless changed; schedule, list, downloads and log: **Admin → Backup and restore** |
 | Tunnel status | Cloudflare → Zero Trust → Networks → Tunnels (should say *Healthy*) |
 | Uptime alerts | add https://esign.method365sign.com/healthz to a free monitor such as UptimeRobot |
 

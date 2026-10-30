@@ -51,7 +51,8 @@ Copy `.env.example` to `.env`, fill it in, and restart. Every setting is explain
 | `BASE_URL` | Public URL used in signing links, e.g. `https://esign.yourcompany.com` | `http://localhost:3000` |
 | `NODE_ENV` | `production` turns on start-up safety checks | |
 | `PORT`, `DATA_DIR`, `BACKUP_DIR` | Port, data folder, backups folder | `3000`, `./data`, `./backups` |
-| `AUTO_BACKUP_HOURS`, `BACKUP_KEEP` | Automatic backups | off, 14 |
+| `AUTO_BACKUP_HOURS`, `BACKUP_KEEP` | Automatic backups until a schedule is set on the Backup page (production: daily 02:00) | off, 14 |
+| `SYSTEM_ADMIN_EMAIL` | The only account allowed to restart the server or erase data | first administrator |
 | `SMTP_HOST`, `SMTP_PORT`, `SMTP_SECURE`, `SMTP_USER`, `SMTP_PASS`, `MAIL_FROM` | Outgoing email | email off |
 | `NOTIFY_EMAIL` | Copy of "signed", "declined", "completed" and "signing locked" notices | off |
 | `SESSION_IDLE_MINUTES`, `TRUST_PROXY`, `PKI_COUNTRY` | Advanced | `30`, private networks, `US` |

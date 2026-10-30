@@ -18,6 +18,7 @@ function alreadySigned() {
     <p class="muted">This signing link is no longer valid. ${done
       ? 'All parties have signed. The completed agreement was emailed to you as a PDF attachment.'
       : 'The completed agreement will be emailed to you as a PDF attachment once everyone has signed.'}</p>
+    ${info.view ? viewOffer(info.view) : ''}
     ${info.canRequestAccount ? accountOffer() : ''}`);
   bindAccountOffer();
 }
@@ -231,7 +232,8 @@ async function load() {
       }
       default:
         el.textContent = f.type === 'signature' ? 'Click to sign' : 'Initial';
-        el.onclick = () => (adopted[f.type] ? applySig(f.type) : openPad(f.type));
+        // Each field is signed by its own click, so the person sees every place they sign.
+        el.onclick = () => (adopted[f.type] ? applySig(f.type, f.id) : openPad(f.type, f.id));
     }
     pages[f.page]?.layer.append(el);
     return { f, el };
@@ -384,13 +386,15 @@ $('#nextBtn').onclick = () => {
   next.el.querySelector('input')?.focus({ preventScroll: true });
 };
 
-function applySig(type) {
+// Signs the one field clicked. Fields already signed show the latest adopted image, so a changed
+// signature stays the same everywhere; fields not yet clicked stay empty.
+function applySig(type, fieldId) {
   for (const { f, el } of fieldEls) {
-    if (f.type !== type) continue;
+    if (f.type !== type || (f.id !== fieldId && !values[f.id])) continue;
     values[f.id] = adopted[type];
     el.innerHTML = `<img alt="${type}" src="${adopted[type]}">`;
     el.classList.add('done');
-    el.onclick = () => openPad(type);
+    el.onclick = () => openPad(type, f.id);
   }
   updateProgress();
 }
@@ -400,6 +404,7 @@ const pad = $('#pad');
 const ctx = pad.getContext('2d');
 let mode = 'draw';
 let padType = 'signature';
+let padField = null;
 let inked = false;
 
 function resetPad() {
@@ -448,8 +453,9 @@ function showTab(tab) {
 }
 document.querySelectorAll('.tabs button').forEach((b) => (b.onclick = () => showTab(b.dataset.tab)));
 
-function openPad(type) {
+function openPad(type, fieldId) {
   padType = type;
+  padField = fieldId;
   const saved = info.profile?.[type];
   $('#modalTitle').textContent = saved
     ? (type === 'signature' ? 'Verify your signature' : 'Verify your initials')
@@ -565,7 +571,7 @@ $('#adoptSig').onclick = () => {
   if (!url) return toast('Signature is empty');
   adopted[padType] = url;
   if (padType === 'signature') appearance = mode === 'saved' ? (info.profile.appearance || 'DRAW') : { draw: 'DRAW', type: 'TYPE', upload: 'UPLOAD' }[mode];
-  applySig(padType);
+  applySig(padType, padField);
   $('#modal').classList.add('hidden');
 };
 
@@ -724,15 +730,30 @@ function signedPage(r) {
       ? 'All parties have signed. The completed agreement has been emailed to you as a PDF attachment.'
       : 'The completed agreement will be emailed to you as a PDF attachment once everyone has signed.'}
     This signing link is no longer valid.</p>
+    ${r.view ? viewOffer(r.view) : ''}
     ${r.canRequestAccount ? accountOffer() : ''}`);
   bindAccountOffer();
 }
 
+// After signing, for someone with an account: the agreement is on their Documents list. Signed in already,
+// they go straight to it; otherwise they sign in first and land on it.
+function viewOffer(v) {
+  const href = v.signedIn ? v.path : `/?next=${encodeURIComponent(v.path)}&email=${encodeURIComponent(v.email)}`;
+  return `
+  <div class="identity" id="viewOffer" style="text-align:left">
+    <strong>A copy of this agreement has been saved to your ${esc(info?.app || 'Method 365')} account.</strong>
+    <p class="small muted" style="margin:4px 0 8px">${v.signedIn ? 'Open it to view or download it.' : 'Please log in to view it.'}</p>
+    <p class="small" style="margin:0 0 10px"><span class="muted">Email</span><br><strong>${esc(v.email)}</strong></p>
+    <a class="btn primary" href="${esc(href)}">${v.signedIn ? 'View agreement' : 'Log in'}</a> <button class="ghost" id="viewNo">No thanks</button>
+  </div>`;
+}
+document.addEventListener('click', (e) => { if (e.target.id === 'viewNo') $('#viewOffer')?.remove(); });
+
 // Optional, after signing only: ask the administrators for an account for future documents.
 const accountOffer = () => `
   <div class="identity" id="acctOffer" style="text-align:left">
-    <strong>Create an account with this email for future documents?</strong>
-    <p class="small muted" style="margin:4px 0 8px">Optional. Without one, you'll keep signing with a temporary password emailed to you.</p>
+    <strong>Create an account with this email to view your agreements anytime?</strong>
+    <p class="small muted" style="margin:4px 0 8px">Optional. With an account you can log in to view and download agreements sent to you. Without one, you'll keep signing with a temporary password emailed to you, and signed copies arrive by email.</p>
     <button id="acctYes" class="primary">Yes, request an account</button> <button id="acctNo" class="ghost">No thanks</button>
   </div>`;
 function bindAccountOffer() {
@@ -740,9 +761,10 @@ function bindAccountOffer() {
   $('#acctNo').onclick = () => $('#acctOffer').remove();
   $('#acctYes').onclick = async () => {
     try {
-      await api(`/api/sign/${encodeURIComponent(token)}/request-account`, { method: 'POST' });
-      $('#acctOffer').innerHTML = '<strong>Request sent.</strong> An administrator will set up your account and email you your sign-in details.';
-    } catch (e) { toast(e.message, 4000); }
+      $('#acctYes').disabled = true;
+      const r = await api(`/api/sign/${encodeURIComponent(token)}/request-account`, { method: 'POST' });
+      $('#acctOffer').innerHTML = `<strong>Request sent${r.caseNo ? `: case ${esc(r.caseNo)}` : ''}.</strong> An administrator will set up your account and email you your sign-in details.`;
+    } catch (e) { $('#acctYes').disabled = false; toast(e.message, 4000); }
   };
 }
 

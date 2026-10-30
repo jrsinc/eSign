@@ -75,11 +75,13 @@ app.use((req, res, next) => {
   next();
 });
 
+const STARTED_AT = new Date().toISOString();
+
 // For uptime monitors and Docker: is the server up and its data folder readable?
 app.get('/healthz', (req, res) => {
   try {
     fs.accessSync(store.DATA_DIR, fs.constants.R_OK | fs.constants.W_OK);
-    res.json({ ok: true, version: require('./package.json').version, email: mailer.enabled() });
+    res.json({ ok: true, version: require('./package.json').version, email: mailer.enabled(), started: STARTED_AT });
   } catch {
     res.status(503).json({ ok: false });
   }
@@ -148,7 +150,17 @@ const saveSessions = () => {
   fs.writeFileSync(SESSIONS_FILE, JSON.stringify(Object.fromEntries(sessions)));
 };
 const challenges = new Map(); // pending two-step sign-ins: id -> { userId, codeHash, expires, attempts, sentAt }
-const publicUser = (u) => ({ id: u.id, email: u.email, name: u.name, role: u.role, status: u.status, createdAt: u.createdAt, lastLoginAt: u.lastLoginAt, lockedUntil: u.lockedUntil, permissions: u.permissions || {}, can: { viewAudit: can(u, 'viewAudit'), downloadAudit: can(u, 'downloadAudit') } });
+const publicUser = (u) => ({ id: u.id, email: u.email, name: u.name, role: u.role, status: u.status, createdAt: u.createdAt, lastLoginAt: u.lastLoginAt, lockedUntil: u.lockedUntil, permissions: u.permissions || {}, systemAdmin: isSystemAdmin(u), can: { viewAudit: can(u, 'viewAudit'), downloadAudit: can(u, 'downloadAudit') } });
+
+// The system administrator is the only person who may restart the server or erase its data; other
+// administrators, even with full access, may not. SYSTEM_ADMIN_EMAIL in .env names them; otherwise it is
+// the first administrator, the account created at first-time setup.
+function systemAdmin() {
+  const named = String(process.env.SYSTEM_ADMIN_EMAIL || '').trim().toLowerCase();
+  if (named) return store.getUserByEmail(named) || null;
+  return store.users().filter((u) => !u.createdBy).sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)))[0] || null;
+}
+const isSystemAdmin = (u) => !!u && u.role === 'admin' && u.status === 'active' && systemAdmin()?.id === u.id;
 // Administrators can do everything; other users only what an administrator granted them.
 const can = (u, permission) => u.role === 'admin' || !!u.permissions?.[permission];
 const actorOf = (u) => `${u.name} (${u.email})`;
@@ -174,6 +186,7 @@ function requireUser(req, res, next) {
   next();
 }
 const requireAdminRole = (req, res, next) => (req.user.role === 'admin' ? next() : res.status(403).json({ error: 'Only administrators can do this.' }));
+const requireSystemAdmin = (req, res, next) => (isSystemAdmin(req.user) ? next() : res.status(403).json({ error: 'Only the system administrator can do this.' }));
 
 // Simple per-IP brake on sign-in attempts (20 per 15 minutes).
 const attemptsByIp = new Map();
@@ -336,16 +349,42 @@ app.post('/api/logout', (req, res) => {
 app.get('/api/me', requireUser, (req, res) =>
   res.json({ company: COMPANY, companyFull: COMPANY_FULL, app: APP_NAME, mail: mailer.enabled(), loginCode: LOGIN_CODE, notify: process.env.NOTIFY_EMAIL || '', dateFormats: DATE_FORMATS, reasons: REASONS, user: publicUser(req.user), idleMinutes: IDLE_MINUTES }));
 
+// Outside signers: people who sign with a temporary password because they have no account here.
+// Listed for administrators with the agreements sent to them, so an account can be given if wanted.
+app.get('/api/outside-signers', requireUser, requireAdminRole, (req, res) => {
+  const people = new Map();
+  for (const doc of store.all()) {
+    if (doc.status === 'draft') continue;
+    for (const s of doc.signers) {
+      const email = String(s.email || '').trim().toLowerCase();
+      if (!email || store.getUserByEmail(email)) continue;
+      const p = people.get(email) || { email, name: s.name, company: store.getProfile(email)?.company || '', agreements: [], signed: 0, lastActivity: '', accountRequestedAt: null };
+      p.name = s.name || p.name;
+      p.company = s.company || p.company;
+      p.agreements.push({ id: doc.id, agreementId: doc.agreementId, title: doc.title, status: s.status, signedAt: s.signedAt });
+      if (s.status === 'signed') p.signed++;
+      const last = s.signedAt || s.viewedAt || doc.sentAt || doc.createdAt || '';
+      if (last > p.lastActivity) p.lastActivity = last;
+      if (s.accountRequestedAt) p.accountRequestedAt = s.accountRequestedAt;
+      people.set(email, p);
+    }
+  }
+  const open = store.tickets().filter((t) => t.status === 'open' && t.kind === 'account');
+  res.json([...people.values()]
+    .map((p) => ({ ...p, request: open.find((t) => sameEmail(t.email, p.email))?.caseNo || null }))
+    .sort((a, b) => b.lastActivity.localeCompare(a.lastActivity)));
+});
+
 // ---------- Sign-in help tickets ----------
 // From the sign-in page: "the code never arrived" or "forgot my password / locked out". The person
 // gets a case number; administrators are emailed and see it under Admin > Support tickets, fix the
 // problem (for example correct the email, unlock, set a new password) and resolve it with a note.
-const TICKET_KINDS = { code: 'Sign-in code not received', password: 'Forgot password or locked out' };
+const TICKET_KINDS = { code: 'Sign-in code not received', password: 'Forgot password or locked out', account: 'Account request (outside signer)' };
 const ticketsByIp = new Map();
 const publicTicket = (t) => ({ caseNo: t.caseNo, kind: TICKET_KINDS[t.kind], status: t.status, createdAt: t.createdAt });
 
 app.post('/api/support/sign-in-help', async (req, res) => {
-  const kind = TICKET_KINDS[req.body.kind] ? req.body.kind : 'code';
+  const kind = ['code', 'password'].includes(req.body.kind) ? req.body.kind : 'code';
   // At most 5 tickets an hour from one address.
   const ip = clientIp(req);
   const recent = (ticketsByIp.get(ip) || []).filter((t) => Date.now() - t < 3600000);
@@ -461,6 +500,9 @@ function adminPassword(body, person) {
 }
 
 // ---------- User management (administrators) ----------
+// A strong password for the Generate button, shown in the box so the administrator sees it before saving.
+app.get('/api/password/generate', requireUser, requireAdminRole, (req, res) => res.json({ password: authLib.generatePassword() }));
+
 const PERMISSIONS = ['viewAudit', 'downloadAudit'];
 app.get('/api/users', requireUser, requireAdminRole, (req, res) => res.json(store.users().map(publicUser)));
 
@@ -476,6 +518,12 @@ app.post('/api/users', requireUser, requireAdminRole, async (req, res) => {
   const permissions = Object.fromEntries(PERMISSIONS.map((p) => [p, !!req.body.permissions?.[p]]));
   const user = { id: id(8), email, name, role, status: 'active', passwordHash: authLib.hashPassword(pw.password), permissions, createdAt: now(), createdBy: req.user.id, failed: 0 };
   store.addUser(user);
+  // An outside signer's account request is done once their account exists.
+  for (const t of store.tickets().filter((x) => x.status === 'open' && x.kind === 'account' && sameEmail(x.email, email))) {
+    Object.assign(t, { status: 'resolved', resolvedAt: now(), resolvedBy: actorOf(req.user), resolution: 'Account created; the sign-in details were emailed.' });
+    sysLog(req, 'support', `Support ticket ${t.caseNo} resolved: account created for ${email}`);
+  }
+  store.save();
   sysLog(req, 'user', `User created: ${actorOf(user)} as ${role}`, `Permissions: ${PERMISSIONS.filter((p) => permissions[p]).join(', ') || 'none'}. Password set by ${req.user.name} and emailed to the user.`);
   // Welcome email with the sign-in ID and password. Signing in also needs the one-time code we email each time.
   mailer.send({
@@ -501,6 +549,7 @@ app.post('/api/users/:id/:action', requireUser, requireAdminRole, async (req, re
   switch (req.params.action) {
     case 'disable':
       if (self) return res.status(400).json({ error: "You can't deactivate your own account." });
+      if (isSystemAdmin(user)) return res.status(400).json({ error: 'This is the system administrator, who can\'t be deactivated.' });
       user.status = 'disabled';
       signOut();
       sysLog(req, 'user', `User deactivated: ${actorOf(user)}`);
@@ -517,6 +566,7 @@ app.post('/api/users/:id/:action', requireUser, requireAdminRole, async (req, re
     case 'role': {
       const role = req.body.role;
       if (!ROLES.includes(role)) return res.status(400).json({ error: 'Unknown role' });
+      if (isSystemAdmin(user) && role !== 'admin') return res.status(400).json({ error: 'The system administrator always keeps administrator access.' });
       if (user.role === 'admin' && role !== 'admin' && admins.length <= 1 && user.status === 'active') return res.status(400).json({ error: 'Keep at least one active administrator.' });
       sysLog(req, 'user', `Role of ${actorOf(user)} changed from ${user.role} to ${role}`);
       user.role = role;
@@ -721,6 +771,219 @@ app.post('/api/restore', requireUser, requireAdminRole, backupUpload.single('fil
   const counts = backupCounts(db);
   sysLog(req, 'backup', `Data restored from a backup by ${req.user.name}`, `Backup made ${body.createdAt} by ${body.createdBy}: ${counts.agreements} agreements, ${counts.users} users, ${counts.companies} companies. Previous data saved as ${restorePoint}. Everyone was signed out.`);
   res.json({ ok: true, counts, restorePoint });
+});
+
+// ---------- Automatic backups (administrators) ----------
+// Set on the Backup page: off, every few hours, daily at a time or weekly on a day at a time, in the
+// server's time. Each run saves a backup in the backups folder, keeps the newest ones and is recorded in
+// the system log. Until an administrator sets a schedule, production servers back up daily at 02:00
+// (or every AUTO_BACKUP_HOURS from .env).
+const BACKUP_FREQUENCIES = ['off', 'hours', 'daily', 'weekly'];
+const AUTO_BACKUP_HOURS = Number(process.env.AUTO_BACKUP_HOURS || 0);
+const BACKUP_KEEP = Math.max(1, Number(process.env.BACKUP_KEEP || 14));
+const SERVER_TZ = Intl.DateTimeFormat().resolvedOptions().timeZone;
+
+function backupSchedule() {
+  const set = store.settings().backup;
+  if (set) return set;
+  if (AUTO_BACKUP_HOURS > 0) return { frequency: 'hours', hours: AUTO_BACKUP_HOURS, time: '02:00', day: 0, keep: BACKUP_KEEP };
+  return { frequency: PRODUCTION ? 'daily' : 'off', hours: 24, time: '02:00', day: 0, keep: BACKUP_KEEP };
+}
+
+// The scheduled time at or before `at` (null if backups are off). "Every N hours" counts from the last run.
+function lastSlot(sch, at, last) {
+  if (sch.frequency === 'off') return null;
+  if (sch.frequency === 'hours') return new Date(last + sch.hours * 3600000) <= at ? at : null;
+  const [h, m] = sch.time.split(':').map(Number);
+  const slot = new Date(at);
+  slot.setHours(h, m, 0, 0);
+  if (slot > at) slot.setDate(slot.getDate() - 1);
+  if (sch.frequency === 'weekly') while (slot.getDay() !== sch.day) slot.setDate(slot.getDate() - 1);
+  return slot;
+}
+function nextBackupAt(sch) {
+  if (sch.frequency === 'off') return null;
+  const state = store.settings().backupState || {};
+  const last = Date.parse(state.lastAutoAt || sch.updatedAt || STARTED_AT);
+  if (sch.frequency === 'hours') return new Date(Math.max(Date.now(), last + sch.hours * 3600000)).toISOString();
+  const [h, m] = sch.time.split(':').map(Number);
+  const next = new Date();
+  next.setHours(h, m, 0, 0);
+  while (next <= new Date() || (sch.frequency === 'weekly' && next.getDay() !== sch.day)) next.setDate(next.getDate() + 1);
+  return next.toISOString();
+}
+
+const sizeText = (n) => (n < 1048576 ? `${Math.max(1, Math.round(n / 1024))} KB` : `${(n / 1048576).toFixed(1)} MB`);
+
+// Saves a backup in the backups folder. `prefix` says why: auto, manual, before-restart, before-erase.
+function saveBackup(prefix, createdBy) {
+  fs.mkdirSync(BACKUP_DIR, { recursive: true });
+  const name = `${prefix}-${backupName()}`;
+  fs.writeFileSync(path.join(BACKUP_DIR, name), makeBackup(createdBy));
+  return { name, size: fs.statSync(path.join(BACKUP_DIR, name)).size };
+}
+
+function autoBackup() {
+  const sch = backupSchedule();
+  const state = (store.settings().backupState ||= {});
+  try {
+    const { name, size } = saveBackup('auto', 'Automatic backup');
+    const autos = fs.readdirSync(BACKUP_DIR).filter((f) => f.startsWith('auto-') && f.endsWith('.esbackup')).sort();
+    const removed = autos.slice(0, Math.max(0, autos.length - (sch.keep || BACKUP_KEEP)));
+    for (const old of removed) fs.unlinkSync(path.join(BACKUP_DIR, old));
+    Object.assign(state, { lastAutoAt: now(), lastResult: 'ok', lastName: name, lastError: undefined });
+    sysLog(null, 'backup', `Automatic backup saved: ${name}`, `${sizeText(size)}${removed.length ? ` - ${removed.length} older automatic backup${removed.length > 1 ? 's' : ''} removed (keeping ${sch.keep})` : ''}`);
+  } catch (e) {
+    console.error('Automatic backup failed:', e);
+    Object.assign(state, { lastAutoAt: now(), lastResult: 'failed', lastError: e.message });
+    sysLog(null, 'backup', `Automatic backup FAILED: ${e.message}`);
+  }
+  store.save();
+}
+
+// Checked every minute.
+function backupTick() {
+  const sch = backupSchedule();
+  if (sch.frequency === 'off') return;
+  const last = Date.parse(store.settings().backupState?.lastAutoAt || sch.updatedAt || STARTED_AT);
+  const slot = lastSlot(sch, new Date(), last);
+  if (slot && slot.getTime() > last) autoBackup();
+}
+
+const backupKind = (name) => (/^auto-/.test(name) ? 'Automatic' : /^manual-/.test(name) ? 'Saved on server' : /^before-restart-/.test(name) ? 'Before restart'
+  : /^before-erase-/.test(name) ? 'Before erasing data' : /^restore-point-/.test(name) ? 'Before a restore' : 'Other');
+
+app.get('/api/backups', requireUser, requireAdminRole, (req, res) => {
+  const files = fs.existsSync(BACKUP_DIR) ? fs.readdirSync(BACKUP_DIR).filter((f) => f.endsWith('.esbackup')) : [];
+  const sch = backupSchedule();
+  res.json({
+    schedule: { ...sch, custom: !!store.settings().backup }, nextAt: nextBackupAt(sch), state: store.settings().backupState || {},
+    serverTime: now(), timeZone: SERVER_TZ, folder: BACKUP_DIR,
+    files: files.map((name) => {
+      const st = fs.statSync(path.join(BACKUP_DIR, name));
+      return { name, size: st.size, at: st.mtime.toISOString(), kind: backupKind(name) };
+    }).sort((a, b) => b.at.localeCompare(a.at)),
+    log: syslog.read().filter((e) => e.type === 'backup').slice(-50).reverse(),
+  });
+});
+
+app.put('/api/backups/schedule', requireUser, requireAdminRole, (req, res) => {
+  const b = req.body || {};
+  if (!BACKUP_FREQUENCIES.includes(b.frequency)) return res.status(400).json({ error: 'Please choose how often to back up.' });
+  const time = String(b.time || '02:00');
+  if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(time)) return res.status(400).json({ error: 'Please give a time like 02:00.' });
+  const hours = Number(b.hours);
+  if (b.frequency === 'hours' && ![1, 2, 3, 4, 6, 8, 12].includes(hours)) return res.status(400).json({ error: 'Please choose every 1, 2, 3, 4, 6, 8 or 12 hours.' });
+  const day = Number(b.day);
+  if (b.frequency === 'weekly' && !(Number.isInteger(day) && day >= 0 && day <= 6)) return res.status(400).json({ error: 'Please choose a day of the week.' });
+  const keep = Number(b.keep);
+  if (!Number.isInteger(keep) || keep < 1 || keep > 365) return res.status(400).json({ error: 'Keep between 1 and 365 automatic backups.' });
+  const sch = { frequency: b.frequency, time, hours: hours || 24, day: Number.isInteger(day) ? day : 0, keep, updatedAt: now(), updatedBy: actorOf(req.user) };
+  store.settings().backup = sch;
+  store.save();
+  const days = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+  const text = { off: 'off', hours: `every ${sch.hours} hours`, daily: `daily at ${time}`, weekly: `every ${days[sch.day]} at ${time}` }[sch.frequency];
+  sysLog(req, 'backup', `Automatic backup schedule set to ${text} by ${req.user.name}`, sch.frequency === 'off' ? undefined : `Server time (${SERVER_TZ}); keeping the newest ${keep}`);
+  res.json({ ok: true, schedule: sch, nextAt: nextBackupAt(sch) });
+});
+
+// Save a backup on the server now (it is listed with the others and can be downloaded).
+app.post('/api/backups/run', requireUser, requireAdminRole, (req, res) => {
+  const { name, size } = saveBackup('manual', `Saved on the server by ${actorOf(req.user)}`);
+  sysLog(req, 'backup', `Backup saved on the server by ${req.user.name}: ${name}`, `${sizeText(size)}`);
+  res.json({ ok: true, name });
+});
+
+app.get('/api/backups/file/:name', requireUser, requireAdminRole, (req, res) => {
+  const name = String(req.params.name);
+  if (!/^[\w.-]+\.esbackup$/.test(name) || !fs.existsSync(path.join(BACKUP_DIR, name))) return res.status(404).json({ error: 'Backup not found' });
+  sysLog(req, 'backup', `Backup downloaded from the server by ${req.user.name}: ${name}`);
+  res.download(path.join(BACKUP_DIR, name), name);
+});
+
+// ---------- Server restart (system administrator only) ----------
+// Two kinds, each after saving a backup in the backups folder:
+//   update: get the newest code from GitHub (git), install packages if they changed, check it, restart.
+//   erase:  the same, and first delete ALL data (agreements, users, companies, keys, logs). The server
+//           then starts empty, with the first-time setup page (ADMIN_PASSWORD from .env).
+// The server restarts by exiting; the Windows service (NSSM) or Docker starts it again.
+const { execFileSync } = require('child_process');
+const hasGit = () => fs.existsSync(path.join(__dirname, '.git'));
+const git = (...args) => execFileSync('git', args, { cwd: __dirname, encoding: 'utf8', timeout: 120000, stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+const npmCi = () => execFileSync(process.platform === 'win32' ? 'npm.cmd' : 'npm', ['ci', '--omit=dev'], { cwd: __dirname, encoding: 'utf8', timeout: 600000, stdio: ['ignore', 'pipe', 'pipe'], shell: process.platform === 'win32' });
+let restarting = false;
+
+// The page only needs the start time, to tell when a restart has finished.
+app.get('/api/server', requireUser, requireSystemAdmin, (req, res) => res.json({ startedAt: STARTED_AT }));
+
+app.post('/api/server/restart', requireUser, requireSystemAdmin, (req, res) => {
+  const mode = req.body.mode === 'erase' ? 'erase' : 'update';
+  if (!authLib.verifyPassword(String(req.body.password || ''), req.user.passwordHash)) return res.status(403).json({ error: 'Your password is not correct.' });
+  if (mode === 'erase' && req.body.confirm !== 'ERASE') return res.status(400).json({ error: 'Type ERASE to confirm that all data will be deleted.' });
+  if (restarting) return res.status(409).json({ error: 'A restart is already under way.' });
+  restarting = true;
+  const steps = [];
+  try {
+    // 1. Backup first, always.
+    const backup = saveBackup(mode === 'erase' ? 'before-erase' : 'before-restart', `Automatic backup before ${mode === 'erase' ? 'erasing data' : 'restart'} by ${actorOf(req.user)}`);
+    steps.push(`Backup saved: ${backup.name}`);
+    sysLog(req, 'backup', `Backup saved before ${mode === 'erase' ? 'erasing all data and restarting' : 'restarting'}: ${backup.name}`, `${sizeText(backup.size)}`);
+
+    // 2. Newest code from GitHub. If anything fails, the code goes back to what was running.
+    let update = null;
+    if (hasGit()) {
+      const branch = git('rev-parse', '--abbrev-ref', 'HEAD');
+      const before = git('rev-parse', 'HEAD');
+      try {
+        git('fetch', '--quiet', 'origin', branch);
+        git('merge', '--ff-only', `origin/${branch}`);
+        const after = git('rev-parse', 'HEAD');
+        const changed = before === after ? [] : git('diff', '--name-only', before, after).split('\n');
+        if (changed.some((f) => f === 'package.json' || f === 'package-lock.json')) { npmCi(); steps.push('Packages updated'); }
+        for (const f of ['server.js', ...fs.readdirSync(path.join(__dirname, 'lib')).map((f) => `lib/${f}`)]) execFileSync(process.execPath, ['--check', f], { cwd: __dirname, stdio: 'pipe' });
+        update = { from: before.slice(0, 7), to: after.slice(0, 7), commits: before === after ? 0 : git('rev-list', '--count', `${before}..${after}`) };
+        steps.push(before === after ? 'Code already up to date' : `Code updated ${update.from} → ${update.to} (${update.commits} change${update.commits === '1' ? '' : 's'})`);
+      } catch (e) {
+        try { git('reset', '--hard', before); } catch {}
+        restarting = false;
+        const why = String(e.stderr || e.message).trim().split('\n')[0];
+        sysLog(req, 'server', `Restart cancelled: the code update failed (${why}). The server keeps running the current version.`);
+        return res.status(500).json({ error: `The code update failed, so nothing was restarted: ${why}`, steps });
+      }
+    } else {
+      steps.push('No git folder: restarting with the current code');
+    }
+
+    // 3. Erase all data (the backup above keeps a copy).
+    if (mode === 'erase') {
+      const keep = path.resolve(BACKUP_DIR);
+      for (const entry of fs.readdirSync(store.DATA_DIR)) {
+        const full = path.resolve(store.DATA_DIR, entry);
+        if (keep === full || keep.startsWith(full + path.sep)) continue;
+        fs.rmSync(full, { recursive: true, force: true });
+      }
+      store.reload();
+      sessions.clear();
+      challenges.clear();
+      syslog = audit.systemLog(store.DATA_DIR);
+      steps.push('All data erased');
+      // The new, empty system log starts with who erased the data and where the backup is.
+      sysLog(req, 'server', `All data erased by the system administrator ${req.user.name}; the server restarted empty`, `Backup of the erased data: ${backup.name}${update ? ` - code ${update.to}` : ''}`);
+    } else {
+      sysLog(req, 'server', `Server restarted by the system administrator ${req.user.name}`, steps.slice(1).join(' - '));
+    }
+    res.json({ ok: true, mode, steps, backup: backup.name, update });
+  } catch (e) {
+    restarting = false;
+    console.error('Restart failed:', e);
+    return res.status(500).json({ error: `Restart failed: ${e.message}`, steps });
+  }
+  // 4. Restart: exit once the answer has gone out; the service manager starts the server again.
+  console.log(`Restart (${mode}) requested by ${actorOf(req.user)}`);
+  setTimeout(() => {
+    server.close(() => process.exit(0));
+    setTimeout(() => process.exit(0), 3000).unref();
+  }, 500);
 });
 
 // Status emails to the sender, like DocuSign's "X has signed" notices.
@@ -1370,6 +1633,13 @@ function identityBlocked(req, res, doc, signer) {
   return null;
 }
 
+// Outside signers have no sign-ins, so their signing activity is also kept in the system log
+// (account holders' sign-ins are there already). Each agreement's own audit trail has everything.
+function signerSysLog(req, doc, signer, text, detail) {
+  if (store.getUserByEmail(signer.email)) return;
+  sysLog({ ip: req.ip, actor: `${who(signer)} - outside signer` }, 'signer', `${text} - ${doc.agreementId || 'draft'} "${doc.title}"`, detail);
+}
+
 const signLocked = (signer) => signer.signLockedUntil && Date.parse(signer.signLockedUntil) > Date.now();
 const tempPwValid = (signer) => !!signer.tempPw?.hash && signer.tempPw.expires > Date.now();
 
@@ -1377,6 +1647,7 @@ async function sendTempPassword(doc, signer, req) {
   const password = authLib.generatePassword();
   signer.tempPw = { hash: authLib.hashPassword(password), expires: Date.now() + TEMP_PW_MINUTES * 60000, sentAt: Date.now() };
   log(doc, `Temporary signing password emailed to ${signer.email}`, req, 'email_sent', `${auditStamp(now())} - Valid ${TEMP_PW_MINUTES} minutes, for this agreement and recipient only, one use`);
+  signerSysLog(req, doc, signer, 'Temporary signing password emailed', `Valid ${TEMP_PW_MINUTES} minutes, one use`);
   store.save();
   await mailer.send({
     to: signer.email,
@@ -1413,12 +1684,14 @@ async function checkSigningPassword(req, doc, signer, idn) {
     signer.signFailed = 0;
     signer.signLockedUntil = new Date(Date.now() + SIGN_LOCK_MINUTES * 60000).toISOString();
     log(doc, `Signing locked for ${who(signer)} for ${SIGN_LOCK_MINUTES} minutes after ${SIGN_LOCK_AFTER} wrong passwords`, req, 'failed');
+    signerSysLog(req, doc, signer, `Signing locked for ${SIGN_LOCK_MINUTES} minutes after ${SIGN_LOCK_AFTER} wrong passwords`);
     store.save();
     await notifySender(`Signing locked: ${signer.name} on "${doc.title}" [${doc.agreementId}]`,
       `Signing agreement ${doc.agreementId} "${doc.title}" as ${who(signer)} was locked for ${SIGN_LOCK_MINUTES} minutes after ${SIGN_LOCK_AFTER} wrong passwords.\nIP address: ${clientIp(req)} - Device: ${deviceOf(req.headers['user-agent'])}\n\nIf this wasn't ${signer.name}, someone else may have their signing link.`, undefined, doc);
     return { status: 423, error: `Password incorrect. Signing is now locked for ${SIGN_LOCK_MINUTES} minutes and the sender has been notified.` };
   }
   log(doc, `Wrong password at signing for ${who(signer)} (${signer.signFailed} of ${SIGN_LOCK_AFTER})`, req, 'failed');
+  signerSysLog(req, doc, signer, `Wrong temporary password at signing (${signer.signFailed} of ${SIGN_LOCK_AFTER})`);
   store.save();
   return { status: 401, error: 'Password incorrect. Please try again.', attemptsLeft: SIGN_LOCK_AFTER - signer.signFailed };
 }
@@ -1426,6 +1699,15 @@ async function checkSigningPassword(req, doc, signer, idn) {
 // GxP training: no training records are kept yet, so nobody is blocked. When training is added,
 // return false here for anyone whose required training is missing or expired.
 const trainingCurrent = () => true;
+
+// After signing, like DocuSign's "A copy of this document has been saved to your account": a signer with
+// an account here can log in and find the agreement on their Documents list (recipients may view it).
+function viewAfterSigning(req, doc, signer) {
+  const account = store.getUserByEmail(signer.email);
+  if (!account || account.status !== 'active') return null;
+  const user = sessionUser(req);
+  return { email: account.email, path: `/#/doc/${doc.id}`, signedIn: !!user && user.id === account.id };
+}
 
 // A signing link works only until its owner signs. After that it just says "already signed";
 // the signed copy reaches them as an email attachment instead.
@@ -1439,6 +1721,7 @@ app.get('/api/sign/:token', async (req, res) => {
       signer: { name: signer.name, status: 'signed', signedAt: signer.signedAt },
       // After signing without an account, the person may ask for one.
       canRequestAccount: !store.getUserByEmail(signer.email) && !signer.accountRequestedAt,
+      view: viewAfterSigning(req, doc, signer),
     });
   }
   const idn = identityBlocked(req, res, doc, signer);
@@ -1450,6 +1733,7 @@ app.get('/api/sign/:token', async (req, res) => {
     signer.status = 'viewed';
     signer.viewedAt = now();
     log(doc, `Document viewed by ${who(signer)}`, req, 'viewed');
+    signerSysLog(req, doc, signer, 'Agreement opened for signing', deviceOf(req.headers['user-agent']));
     store.save();
   }
   // Flow B: the temporary password is emailed automatically the first time the document is opened.
@@ -1539,18 +1823,27 @@ app.post('/api/sign/:token/request-account', async (req, res) => {
   const { doc, signer } = ctx;
   if (signer.status !== 'signed') return res.status(400).json({ error: 'You can ask for an account after signing.' });
   if (store.getUserByEmail(signer.email)) return res.status(400).json({ error: 'An account with this email already exists.' });
-  if (signer.accountRequestedAt) return res.json({ ok: true, already: true });
+  // The request is a support ticket, so administrators see it under Admin > Support tickets even if
+  // email doesn't reach them. Asking again returns the same open case.
+  const open = store.tickets().find((t) => t.status === 'open' && t.kind === 'account' && sameEmail(t.email, signer.email));
+  if (open) return res.json({ ok: true, already: true, caseNo: open.caseNo });
   signer.accountRequestedAt = now();
+  const ticket = {
+    id: id(8), caseNo: store.nextCaseNo(), kind: 'account', email: String(signer.email).trim().toLowerCase(), userId: null, name: signer.name,
+    message: `Signed ${doc.agreementId} "${doc.title}"${signer.company ? `, company: ${signer.company}` : ''}`,
+    status: 'open', createdAt: now(), ip: clientIp(req), device: deviceOf(req.headers['user-agent']),
+  };
+  store.tickets().unshift(ticket);
   store.save();
-  sysLog(req, 'user', `Account requested by ${who(signer)} after signing ${doc.agreementId}`);
+  signerSysLog(req, doc, signer, `Account requested: support ticket ${ticket.caseNo} opened`);
   for (const admin of store.users().filter((u) => u.role === 'admin' && u.status === 'active')) {
-    await mailer.send({
-      to: admin.email, subject: `Account request: ${signer.name}`, heading: 'Account request',
-      text: `${who(signer)} signed agreement ${doc.agreementId} "${doc.title}" and asked for an account for future documents.\n\nTo give them one, add them on the Users page. If you don't, they can still sign future documents with a temporary password.`,
-      link: BASE_URL, linkLabel: `OPEN ${APP_NAME.toUpperCase()}`,
+    mailer.send({
+      to: admin.email, subject: `Account request from ${signer.name} (${ticket.caseNo})`, heading: 'Account request',
+      text: `${who(signer)} signed agreement ${doc.agreementId} "${doc.title}" and asked for an account for future documents.\n\nCase: ${ticket.caseNo}\n\nTo give them one, open Admin > Support tickets and click Create account. If you don't, they can still sign future documents with a temporary password.`,
+      link: `${BASE_URL}/#/tickets`, linkLabel: 'OPEN SUPPORT TICKETS',
     }).catch((e) => console.error('Mail error:', e.message));
   }
-  res.json({ ok: true });
+  res.json({ ok: true, caseNo: ticket.caseNo });
 });
 
 // Issues each signer's certificate (logged first, so the audit report lists it), then builds the
@@ -1781,6 +2074,7 @@ app.post('/api/sign/:token', async (req, res) => {
     ...(title ? { title } : {}), ...(companyName ? { company: companyName } : {}),
     ...(sigValue('signature') ? { signature: sigValue('signature') } : {}), ...(sigValue('initials') ? { initials: sigValue('initials') } : {}),
   });
+  signerSysLog(req, doc, signer, 'Agreement signed with a temporary password', reason ? `Reason: ${reason}` : undefined);
   log(doc, `Document e-signed by ${who(signer)}`, req, 'signed',
     `Signature Date: ${auditStamp(signer.signedAt)} - Time Source: server- IP address: ${signer.ip} - Device: ${deviceOf(signer.userAgent)} - Consent: Electronic Record and Signature Disclosure v${POLICY_VERSION} - Identity: signer email matches invited email - Authentication: ${authText} - Signature Appearance Selected: ${appearance}${reason ? ` - Reason: ${reason}` : ''}`);
 
@@ -1815,6 +2109,7 @@ app.post('/api/sign/:token', async (req, res) => {
     ok: true, completed: doc.status === 'completed',
     confirmation: { name: signer.name, email: signer.email, signedAt: signer.signedAt, reason, agreementId: doc.agreementId, title: doc.title },
     canRequestAccount: idn.flow === 'temp' && !store.getUserByEmail(signer.email),
+    view: viewAfterSigning(req, doc, signer),
   });
 });
 
@@ -1834,6 +2129,7 @@ app.post('/api/sign/:token/decline', async (req, res) => {
   doc.status = 'declined';
   const reason = req.body.reason ? String(req.body.reason).slice(0, 300) : '';
   log(doc, `Document declined by ${who(signer)}${reason ? `. Reason: ${reason}` : ''}`, req, 'declined');
+  signerSysLog(req, doc, signer, 'Agreement declined', reason ? `Reason: ${reason}` : undefined);
   store.save();
   await notifySender(`${signer.name} declined "${doc.title}" [${doc.agreementId}]`, `${who(signer)} declined to sign agreement ${doc.agreementId} "${doc.title}".${reason ? `\nReason: ${reason}` : ''}`, undefined, doc);
   res.json({ ok: true });
@@ -1870,32 +2166,12 @@ for (const d of [...store.all()].filter((d) => d.status !== 'draft' && !d.agreem
 }
 store.save();
 
-// Automatic backups: AUTO_BACKUP_HOURS=24 writes a backup to the backups folder once a day and keeps
-// the newest BACKUP_KEEP (default 14). Copy that folder somewhere off this server too.
-const AUTO_BACKUP_HOURS = Number(process.env.AUTO_BACKUP_HOURS || 0);
-const BACKUP_KEEP = Math.max(1, Number(process.env.BACKUP_KEEP || 14));
-function autoBackup() {
-  try {
-    fs.mkdirSync(BACKUP_DIR, { recursive: true });
-    const name = `auto-${backupName()}`;
-    fs.writeFileSync(path.join(BACKUP_DIR, name), makeBackup('Automatic backup'));
-    const autos = fs.readdirSync(BACKUP_DIR).filter((f) => f.startsWith('auto-') && f.endsWith('.esbackup')).sort();
-    for (const old of autos.slice(0, Math.max(0, autos.length - BACKUP_KEEP))) fs.unlinkSync(path.join(BACKUP_DIR, old));
-    sysLog(null, 'backup', `Automatic backup saved: ${name}`);
-  } catch (e) {
-    console.error('Automatic backup failed:', e);
-    sysLog(null, 'backup', `Automatic backup FAILED: ${e.message}`);
-  }
-}
-
 const server = app.listen(PORT, () => {
   console.log(`${APP_NAME} (${COMPANY}) running at ${BASE_URL}  (email ${mailer.enabled() ? 'ON' : 'OFF - links print here'}${PRODUCTION ? ', production' : ''})`);
   setTimeout(() => sendDueReminders().catch((e) => console.error('Reminder error:', e)), 60 * 1000);
-  if (AUTO_BACKUP_HOURS > 0) {
-    setTimeout(autoBackup, Math.min(5 * 60 * 1000, AUTO_BACKUP_HOURS * 3600 * 1000));
-    setInterval(autoBackup, AUTO_BACKUP_HOURS * 3600 * 1000);
-    console.log(`Automatic backups every ${AUTO_BACKUP_HOURS} h to ${BACKUP_DIR} (keeping ${BACKUP_KEEP})`);
-  }
+  setInterval(backupTick, 60 * 1000);
+  const sch = backupSchedule();
+  if (sch.frequency !== 'off') console.log(`Automatic backups (${sch.frequency}) to ${BACKUP_DIR}, next ${nextBackupAt(sch)}`);
 });
 
 // Stop cleanly when the service manager or Docker asks (data is written synchronously, so nothing is lost).
