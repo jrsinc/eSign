@@ -87,6 +87,17 @@ function bmp(w, h) {
   const broken = await api('/api/documents', form([['broken.png', Buffer.from('\x89PNG\r\n\x1a\nbroken', 'latin1')]]));
   ok(broken.status === 400 && /could not be read as an image/.test(broken.data.error), 'a damaged image gives a clear message');
 
+  // ---- Help Center (the User Manual, no sign-in needed) ----
+  const help = await fetch(`${B}/help.html`);
+  const helpHtml = await help.text();
+  ok(help.status === 200 && helpHtml.includes('Method 365 User Manual') && helpHtml.includes('/help/Method365-User-Manual.pdf'), 'Help Center page is served with the PDF download link');
+  const imgs = [...helpHtml.matchAll(/src="(\/help\/img\/[^"]+)"/g)].map((m) => m[1]);
+  const imgOk = await Promise.all(imgs.map(async (u) => (await fetch(B + u)).status === 200));
+  ok(imgs.length >= 20 && imgOk.every(Boolean), `every manual screenshot is served (${imgs.length})`);
+  const manual = await fetch(`${B}/help/Method365-User-Manual.pdf`);
+  const manualBytes = Buffer.from(await manual.arrayBuffer());
+  ok(manual.status === 200 && manualBytes.subarray(0, 5).toString() === '%PDF-' && (await PDFDocument.load(manualBytes)).getPageCount() > 10, 'the manual PDF downloads');
+
   // ---- Word ----
   if (!soffice()) {
     console.log('SKIP  Word conversion: LibreOffice is not installed here');

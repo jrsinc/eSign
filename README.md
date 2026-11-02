@@ -112,7 +112,9 @@ lib/audit.js       Hash-chained audit trail and system log
 lib/reports.js     Audit trail / system log PDFs and print copies
 lib/mailer.js      SMTP email
 public/            Dashboard (index.html, admin.js), signer page (sign.html, sign.js), verify page
+public/help.html, help/   Help Center: the User Manual with screenshots and flowcharts, and its PDF
 public/manifest.webmanifest, sw.js, offline.html, icons/   Installable web app
+scripts/help-pdf.js  Rebuilds help/Method365-User-Manual.pdf from help.html (run after editing the manual)
 desktop/           Windows desktop app (Electron)
 Dockerfile, docker-compose.yml, deploy/   Production setup (see PRODUCTION.md)
 ```

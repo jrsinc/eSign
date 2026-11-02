@@ -1,0 +1,49 @@
+/* Help Center: the User Manual, readable on screen and printed to PDF. */
+.help { display: grid; grid-template-columns: 240px minmax(0, 1fr); gap: 24px; max-width: 1180px; margin: 24px auto; padding: 0 20px; }
+.help-toc { position: sticky; top: 84px; align-self: start; max-height: calc(100vh - 110px); overflow: auto; }
+.help-toc a { display: block; padding: 6px 10px; border-radius: 6px; color: var(--ink); text-decoration: none; font-size: 13px; }
+.help-toc a:hover { background: var(--panel); color: var(--brand); }
+.help-toc .sub { padding-left: 22px; color: var(--muted); }
+.help-body { min-width: 0; }
+.help-body section { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 24px 28px; margin-bottom: 20px; }
+.help-body h1 { margin-top: 0; }
+.help-body h2 { font-size: 20px; margin: 0 0 12px; }
+.help-body h3 { font-size: 15px; text-transform: none; letter-spacing: 0; color: var(--ink); margin: 22px 0 8px; }
+.help-body p, .help-body li { font-size: 14.5px; line-height: 1.65; }
+.help-body ol, .help-body ul { padding-left: 22px; }
+.help-body li { margin: 4px 0; }
+.help-body table { width: 100%; border-collapse: collapse; margin: 10px 0 16px; font-size: 13.5px; }
+.help-body th, .help-body td { text-align: left; vertical-align: top; padding: 8px 10px; border-bottom: 1px solid var(--line); }
+.help-body th { background: var(--bg); font-weight: 600; }
+figure.shot { margin: 14px 0 18px; }
+figure.shot img { display: block; width: 100%; height: auto; border: 1px solid var(--line); border-radius: 8px; box-shadow: 0 2px 10px rgba(15, 23, 42, .08); }
+figure.shot figcaption, figure.flow figcaption { font-size: 12.5px; color: var(--muted); margin-top: 6px; }
+figure.flow { margin: 14px 0 18px; }
+figure.flow svg { display: block; width: 100%; height: auto; }
+.tip { background: #eff6ff; border: 1px solid #bfdbfe; border-radius: 8px; padding: 10px 14px; font-size: 13.5px; margin: 12px 0; }
+.warn { background: #fffbeb; border: 1px solid #fde68a; border-radius: 8px; padding: 10px 14px; font-size: 13.5px; margin: 12px 0; }
+.help-cover p { margin: 6px 0; }
+.help-actions { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 14px; }
+kbd { font: 12px/1 var(--font); border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 4px; padding: 2px 5px; background: var(--bg); }
+.flow-box { fill: #eef2ff; stroke: #1B2350; stroke-width: 1.4; }
+.flow-start { fill: #1B2350; }
+.flow-ok { fill: #ecfdf5; stroke: #059669; stroke-width: 1.4; }
+.flow-bad { fill: #fef2f2; stroke: #dc2626; stroke-width: 1.4; }
+.flow-q { fill: #fffbeb; stroke: #d97706; stroke-width: 1.4; }
+.flow-t { font: 600 13px var(--font); fill: #1f2937; }
+.flow-s { font: 12px var(--font); fill: #4b5563; }
+.flow-w { font: 600 13px var(--font); fill: #fff; }
+.flow-l { font: 600 12px var(--font); fill: #6b7280; }
+.flow-a { stroke: #64748b; stroke-width: 1.6; fill: none; }
+@media (max-width: 860px) { .help { grid-template-columns: 1fr; } .help-toc { position: static; max-height: none; } .help-body section { padding: 18px; } }
+@media print {
+  @page { size: A4; margin: 14mm 12mm; }
+  body { background: #fff; }
+  header.top, .help-toc, .help-actions { display: none !important; }
+  .help { display: block; margin: 0; padding: 0; max-width: none; }
+  .help-body section { border: 0; padding: 0; margin: 0 0 8mm; break-before: page; }
+  .help-body section.help-cover { break-before: auto; }
+  figure, table, .tip, .warn { break-inside: avoid; }
+  figure.shot img { box-shadow: none; }
+  a { color: inherit; text-decoration: none; }
+}

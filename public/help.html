@@ -1,0 +1,303 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>User Manual – Method 365 Help Center</title>
+  <meta name="theme-color" content="#1B2350">
+  <link rel="icon" type="image/png" href="/icons/favicon-32.png">
+  <link rel="stylesheet" href="/style.css">
+  <link rel="stylesheet" href="/help/help.css">
+</head>
+<body>
+  <header class="top">
+    <div class="logo">
+      <a href="/" title="Method 365"><img src="/brand/method365-logo.svg" alt="Method 365" class="brand-logo"></a>
+      <img src="/logo.png" alt="Jupiter Research Services" class="company-logo">
+    </div>
+    <div class="spacer"></div>
+    <a class="btn primary" href="/help/Method365-User-Manual.pdf" download>⬇ Download PDF</a>
+    <a class="btn ghost" href="/">Open Method 365</a>
+  </header>
+
+  <div class="help">
+    <nav class="help-toc" aria-label="Contents">
+      <a href="#overview">1. Overview</a>
+      <a href="#start">2. Getting started</a>
+      <a href="#send">3. Sending an agreement</a>
+      <a href="#track">4. Tracking agreements</a>
+      <a href="#sign">5. Signing an agreement</a>
+      <a class="sub" href="#sign-account">With an account</a>
+      <a class="sub" href="#sign-temp">Without an account</a>
+      <a class="sub" href="#sign-steps">Signing step by step</a>
+      <a href="#done">6. Completed agreements</a>
+      <a href="#admin">7. Administration</a>
+      <a class="sub" href="#admin-users">Users</a>
+      <a class="sub" href="#admin-tickets">Support tickets</a>
+      <a class="sub" href="#admin-log">System log</a>
+      <a class="sub" href="#admin-backup">Backup and restore</a>
+      <a class="sub" href="#admin-server">Server restart</a>
+      <a href="#trouble">8. Troubleshooting</a>
+    </nav>
+
+    <main class="help-body">
+      <section class="help-cover">
+        <h1>Method 365 User Manual</h1>
+        <p>Electronic signatures for Jupiter Research Services (JRS) at <strong>https://esign.method365sign.com</strong>.</p>
+        <p class="muted small">Version 2.0 · October 2026 · Document JRS-VAL-M365-UM-002 · Screenshots use fictional sample data.</p>
+        <div class="help-actions">
+          <a class="btn primary" href="/help/Method365-User-Manual.pdf" download>⬇ Download this manual as PDF</a>
+          <a class="btn" href="/policy.html">Policies and privacy</a>
+        </div>
+      </section>
+
+      <section id="overview">
+        <h2>1. Overview</h2>
+        <p>Method 365 turns your files into an agreement, sends it to each signer, and keeps the completed, digitally signed PDF with a full audit trail. Every agreement follows the same path:</p>
+        <figure class="flow">
+          <svg viewBox="0 0 960 250" role="img" aria-labelledby="flow1t">
+            <title id="flow1t">Agreement life cycle: upload, recipients and fields, send, signers sign, completed; a signer may decline or the sender may cancel.</title>
+            <defs><marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#64748b"/></marker></defs>
+            <rect class="flow-box" x="10" y="30" width="170" height="68" rx="10"/>
+            <text class="flow-t" x="95" y="58" text-anchor="middle">1. Upload files</text>
+            <text class="flow-s" x="95" y="78" text-anchor="middle">PDF, Word or images</text>
+            <rect class="flow-box" x="200" y="30" width="170" height="68" rx="10"/>
+            <text class="flow-t" x="285" y="58" text-anchor="middle">2. Recipients, fields</text>
+            <text class="flow-s" x="285" y="78" text-anchor="middle">order and signature places</text>
+            <rect class="flow-box" x="390" y="30" width="170" height="68" rx="10"/>
+            <text class="flow-t" x="475" y="58" text-anchor="middle">3. Send</text>
+            <text class="flow-s" x="475" y="78" text-anchor="middle">gets its agreement ID</text>
+            <rect class="flow-box" x="580" y="30" width="170" height="68" rx="10"/>
+            <text class="flow-t" x="665" y="58" text-anchor="middle">4. Signers sign</text>
+            <text class="flow-s" x="665" y="78" text-anchor="middle">in order or all at once</text>
+            <rect class="flow-ok" x="770" y="30" width="180" height="68" rx="10"/>
+            <text class="flow-t" x="860" y="58" text-anchor="middle">5. Completed</text>
+            <text class="flow-s" x="860" y="78" text-anchor="middle">locked signed PDF, emailed</text>
+            <line class="flow-a" x1="180" y1="64" x2="198" y2="64" marker-end="url(#arr)"/>
+            <line class="flow-a" x1="370" y1="64" x2="388" y2="64" marker-end="url(#arr)"/>
+            <line class="flow-a" x1="560" y1="64" x2="578" y2="64" marker-end="url(#arr)"/>
+            <line class="flow-a" x1="750" y1="64" x2="768" y2="64" marker-end="url(#arr)"/>
+            <path class="flow-a" d="M640 98 L560 168" marker-end="url(#arr)"/>
+            <text class="flow-l" x="545" y="134">a signer declines</text>
+            <path class="flow-a" d="M475 98 L380 168" marker-end="url(#arr)"/>
+            <text class="flow-l" x="300" y="134">sender cancels</text>
+            <rect class="flow-bad" x="460" y="170" width="170" height="56" rx="10"/>
+            <text class="flow-t" x="545" y="195" text-anchor="middle">Declined</text>
+            <text class="flow-s" x="545" y="213" text-anchor="middle">reason recorded</text>
+            <rect class="flow-bad" x="270" y="170" width="170" height="56" rx="10"/>
+            <text class="flow-t" x="355" y="195" text-anchor="middle">Cancelled</text>
+            <text class="flow-s" x="355" y="213" text-anchor="middle">reason recorded</text>
+            <text class="flow-s" x="680" y="205">Every step is written to the</text>
+            <text class="flow-s" x="680" y="222">agreement's audit trail.</text>
+          </svg>
+          <figcaption>Figure 1. The life of an agreement.</figcaption>
+        </figure>
+        <table>
+          <tr><th>Role</th><th>What they do</th></tr>
+          <tr><td>Sender</td><td>Prepares and sends agreements; sees the ones they sent and those sent to them.</td></tr>
+          <tr><td>Administrator</td><td>Also manages users, companies, support tickets, the system log and backups.</td></tr>
+          <tr><td>System administrator</td><td>One named administrator who can also update and restart the server.</td></tr>
+          <tr><td>Signer with an account</td><td>JRS staff: signs after signing in; can view agreements sent to them.</td></tr>
+          <tr><td>Outside signer</td><td>Someone without an account: signs with a temporary password emailed to them.</td></tr>
+        </table>
+      </section>
+
+      <section id="start">
+        <h2>2. Getting started</h2>
+        <h3>Signing in</h3>
+        <ol>
+          <li>Open <strong>https://esign.method365sign.com</strong>.</li>
+          <li>Enter your email (your sign-in ID) and password. Click <strong>Show</strong> to check what you typed.</li>
+          <li>Enter the 6-digit code emailed to you. It works once and expires after 10 minutes.</li>
+        </ol>
+        <figure class="shot"><img src="/help/img/01-sign-in.jpg" alt="Sign-in page with email and password"><figcaption>Figure 2. The sign-in page.</figcaption></figure>
+        <ul>
+          <li>Your administrator creates your account and emails you your sign-in ID and password.</li>
+          <li>After 5 wrong passwords in a row your account locks for 15 minutes.</li>
+          <li>You're signed out after 30 minutes without activity.</li>
+        </ul>
+        <div class="tip"><strong>Forgot your password or locked out?</strong> Click <em>Ask an administrator for help</em> on the sign-in page. You get a case number, and an administrator fixes it and emails you.</div>
+        <h3>My profile</h3>
+        <p>Click your name at the top right. Set your title, company and a default signature. The signing page offers them for you to confirm; they're never applied without your click.</p>
+        <figure class="shot"><img src="/help/img/05-profile.jpg" alt="My profile page"><figcaption>Figure 3. My profile.</figcaption></figure>
+      </section>
+
+      <section id="send">
+        <h2>3. Sending an agreement</h2>
+        <h3>Step 1: upload the files</h3>
+        <p>On <strong>Documents</strong>, drop files on the upload box or click it. Choose several files of different types to merge them into one agreement.</p>
+        <figure class="shot"><img src="/help/img/02-documents.jpg" alt="Documents page with upload box and agreement list"><figcaption>Figure 4. Documents: the upload box and your agreements.</figcaption></figure>
+        <table>
+          <tr><th>You upload</th><th>What happens</th></tr>
+          <tr><td>PDF</td><td>Used as it is</td></tr>
+          <tr><td>Word, Excel, PowerPoint, text</td><td>Turned into PDF pages. Check them: a missing font can shift the layout slightly.</td></tr>
+          <tr><td>Images (JPG, PNG, GIF, WebP, TIFF, BMP)</td><td>One A4 page per image, turned upright</td></tr>
+          <tr><td>iPhone HEIC photo</td><td>Refused: share it as JPG instead</td></tr>
+        </table>
+        <h3>Step 2: add recipients and fields</h3>
+        <ol>
+          <li>Under <strong>Add recipients</strong>, click <strong>+ Add recipient</strong> and enter each person's full name and email.</li>
+          <li>Choose the <strong>signing order</strong>: <em>One after another</em> (for “performed by → checked by → QA approval”) or <em>Everyone at once</em>.</li>
+          <li>Under <strong>Fields for</strong>, pick the recipient, click a field type such as <em>E-signature</em>, then click on the page to place it. Drag to move; drag the corner to resize.</li>
+          <li>Copy a field with <kbd>Ctrl</kbd>+<kbd>C</kbd> and paste with <kbd>Ctrl</kbd>+<kbd>V</kbd>.</li>
+        </ol>
+        <figure class="shot"><img src="/help/img/03-editor.jpg" alt="Editor with recipients and field types"><figcaption>Figure 5. The editor: recipients and fields on the left, the document on the right.</figcaption></figure>
+        <div class="tip">Every recipient needs at least one E-signature field. Every signer must give a reason (the meaning of their signature); this can't be switched off.</div>
+        <h3>Step 3: organize pages (optional)</h3>
+        <p>Click <strong>Organize pages</strong> to drag pages into order, rotate or delete them, or <strong>+ Add files</strong> to merge in more.</p>
+        <figure class="shot"><img src="/help/img/04-organize-pages.jpg" alt="Organize pages view"><figcaption>Figure 6. Organize pages.</figcaption></figure>
+        <h3>Step 4: send</h3>
+        <p>Click <strong>Send</strong>. The agreement gets its ID (for example JRS-2026-00014) and the first signer(s) are emailed a personal link.</p>
+      </section>
+
+      <section id="track">
+        <h2>4. Tracking agreements</h2>
+        <p>Open an agreement from <strong>Documents</strong> to see each recipient's status, their signing link and the audit trail.</p>
+        <figure class="shot"><img src="/help/img/06-out-for-signature.jpg" alt="Agreement out for signature"><figcaption>Figure 7. An agreement out for signature: the first signer has signed, the next one is invited.</figcaption></figure>
+        <table>
+          <tr><th>Status</th><th>Meaning</th></tr>
+          <tr><td>Draft</td><td>Not sent; you can still edit or discard it</td></tr>
+          <tr><td>Out for signature</td><td>Sent; waiting for one or more signers</td></tr>
+          <tr><td>Completed</td><td>Everyone signed; the signed PDF is ready</td></tr>
+          <tr><td>Declined</td><td>A signer declined, with a reason</td></tr>
+          <tr><td>Cancelled</td><td>Cancelled by the sender or an administrator, with a reason</td></tr>
+        </table>
+        <ul>
+          <li><strong>Send reminder</strong> emails the signer their link again.</li>
+          <li><strong>Email from Outlook</strong> opens a ready-written email with the signer's link, from your own mailbox.</li>
+          <li><strong>Copy</strong> (beside a link) lets you share it yourself. Each link works only for its invited person.</li>
+          <li><strong>Cancel agreement</strong> asks for a reason. Sent agreements can't be deleted.</li>
+        </ul>
+      </section>
+
+      <section id="sign">
+        <h2>5. Signing an agreement</h2>
+        <p>Only the person the agreement was sent to can sign it. How you prove who you are depends on whether you have a Method 365 account:</p>
+        <figure class="flow">
+          <svg viewBox="0 0 960 320" role="img" aria-labelledby="flow2t">
+            <title id="flow2t">Signing flow: open the link; with an account sign in, without one receive a temporary password; then click each signature place, confirm details and reason, re-enter the password, and the signature is recorded.</title>
+            <defs><marker id="arr2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#64748b"/></marker></defs>
+            <rect class="flow-start" x="10" y="62" width="190" height="60" rx="30"/>
+            <text class="flow-w" x="105" y="88" text-anchor="middle">Open the link</text>
+            <text class="flow-w" x="105" y="106" text-anchor="middle" style="font-weight:400;font-size:12px">in the email</text>
+            <line class="flow-a" x1="200" y1="92" x2="238" y2="92" marker-end="url(#arr2)"/>
+            <polygon class="flow-q" points="320,42 400,92 320,142 240,92"/>
+            <text class="flow-t" x="320" y="88" text-anchor="middle">Have an</text>
+            <text class="flow-t" x="320" y="105" text-anchor="middle">account?</text>
+            <path class="flow-a" d="M390 82 L460 46" marker-end="url(#arr2)"/>
+            <text class="flow-l" x="410" y="52">Yes</text>
+            <path class="flow-a" d="M390 102 L460 138" marker-end="url(#arr2)"/>
+            <text class="flow-l" x="412" y="140">No</text>
+            <rect class="flow-box" x="462" y="12" width="300" height="58" rx="10"/>
+            <text class="flow-t" x="612" y="37" text-anchor="middle">Sign in as the invited email</text>
+            <text class="flow-s" x="612" y="56" text-anchor="middle">password + emailed code, then back to the document</text>
+            <rect class="flow-box" x="462" y="112" width="300" height="58" rx="10"/>
+            <text class="flow-t" x="612" y="137" text-anchor="middle">Temporary password emailed</text>
+            <text class="flow-s" x="612" y="156" text-anchor="middle">this agreement only, one use, 60 minutes</text>
+            <path class="flow-a" d="M762 41 L820 41 L820 205 L110 205 L110 226" marker-end="url(#arr2)"/>
+            <path class="flow-a" d="M762 141 L820 141"/>
+            <rect class="flow-box" x="10" y="228" width="200" height="66" rx="10"/>
+            <text class="flow-t" x="110" y="255" text-anchor="middle">Tick consent; click</text>
+            <text class="flow-t" x="110" y="273" text-anchor="middle">each signature place</text>
+            <rect class="flow-box" x="250" y="228" width="200" height="66" rx="10"/>
+            <text class="flow-t" x="350" y="255" text-anchor="middle">Finish: confirm details</text>
+            <text class="flow-t" x="350" y="273" text-anchor="middle">and choose a reason</text>
+            <rect class="flow-box" x="490" y="228" width="200" height="66" rx="10"/>
+            <text class="flow-t" x="590" y="255" text-anchor="middle">Re-enter your password</text>
+            <text class="flow-s" x="590" y="273" text-anchor="middle">5 wrong = locked 30 min</text>
+            <rect class="flow-ok" x="730" y="228" width="220" height="66" rx="10"/>
+            <text class="flow-t" x="840" y="255" text-anchor="middle">Signed ✓</text>
+            <text class="flow-s" x="840" y="273" text-anchor="middle">PDF emailed when all have signed</text>
+            <line class="flow-a" x1="210" y1="261" x2="248" y2="261" marker-end="url(#arr2)"/>
+            <line class="flow-a" x1="450" y1="261" x2="488" y2="261" marker-end="url(#arr2)"/>
+            <line class="flow-a" x1="690" y1="261" x2="728" y2="261" marker-end="url(#arr2)"/>
+          </svg>
+          <figcaption>Figure 8. How signing works, with and without an account.</figcaption>
+        </figure>
+
+        <h3 id="sign-account">If you have an account</h3>
+        <p>Open the link in the email. If you're not signed in, click <strong>Sign in as …</strong>; after sign-in you return to the document. If you're signed in as someone else, log out first.</p>
+        <h3 id="sign-temp">If you don't have an account</h3>
+        <p>Open the link. A temporary password is emailed to you. It works once, for this agreement only, for 60 minutes. Didn't get it? Click <strong>Send a new temporary password</strong>.</p>
+        <figure class="shot"><img src="/help/img/09-signing-temp-password.jpg" alt="Signing page for a signer without an account"><figcaption>Figure 9. Signing without an account: the temporary password is sent to your email.</figcaption></figure>
+
+        <h3 id="sign-steps">Signing step by step</h3>
+        <ol>
+          <li>Read the document and tick the box agreeing to use electronic records and signatures.</li>
+          <li>Click the first signature place and adopt your signature: use your saved one, draw, type or upload.</li>
+          <li><strong>Click each other signature place.</strong> Each signs on your click, with no retyping, so you see every place you sign. <strong>Next field</strong> takes you to the next one.</li>
+          <li>Click <strong>Finish</strong>, confirm your title and company, and choose the reason for signing.</li>
+          <li>Enter your password (account password or temporary password) and click <strong>Sign</strong>.</li>
+        </ol>
+        <figure class="shot"><img src="/help/img/10-signing-page.jpg" alt="Signing page for an account holder"><figcaption>Figure 10. The signing page for an account holder.</figcaption></figure>
+        <figure class="shot"><img src="/help/img/11-adopt-signature.jpg" alt="Adopt your signature"><figcaption>Figure 11. Adopting your signature (here, the saved one).</figcaption></figure>
+        <figure class="shot"><img src="/help/img/12-confirm-and-sign.jpg" alt="Confirm and sign with reason"><figcaption>Figure 12. Confirm your details and the reason (meaning) of your signature.</figcaption></figure>
+        <figure class="shot"><img src="/help/img/13-password.jpg" alt="Confirm signing with your password"><figcaption>Figure 13. Re-enter your password to sign.</figcaption></figure>
+        <figure class="shot"><img src="/help/img/13b-signed.jpg" alt="Signed successfully"><figcaption>Figure 14. Signed. With an account, View agreement (or Log in) opens it any time.</figcaption></figure>
+        <div class="warn"><strong>Declining:</strong> click <strong>Decline</strong>, give a reason and enter your password. The agreement closes and the sender is told.</div>
+        <p>Without an account, after signing you can click <strong>Yes, request an account</strong>; you get a case number and an administrator follows up.</p>
+      </section>
+
+      <section id="done">
+        <h2>6. Completed agreements</h2>
+        <p>A completed agreement is a locked PDF, certified by Jupiter Research Services and digitally signed by each signer. Nobody can change or delete it.</p>
+        <figure class="shot"><img src="/help/img/07-completed.jpg" alt="Completed agreement"><figcaption>Figure 15. A completed agreement: Download signed PDF, Print copy and Audit trail (PDF).</figcaption></figure>
+        <ul>
+          <li><strong>Download signed PDF</strong>: opens without a password; it can be printed but its text can't be copied or edited.</li>
+          <li><strong>Print copy</strong>: a stamped copy showing who printed it, when, and a link to verify it.</li>
+          <li><strong>Audit trail</strong>: every event with date, time, who, IP address and how the person proved who they were. Choose <em>From</em> and <em>To</em> to see or download one period.</li>
+        </ul>
+        <figure class="shot"><img src="/help/img/08-audit-trail.jpg" alt="Audit trail"><figcaption>Figure 16. The audit trail, with its integrity check.</figcaption></figure>
+        <h3>Verify a signed PDF</h3>
+        <p>Anyone can check a signed PDF on the <strong>Verify</strong> page: an unchanged original shows as valid with its agreement ID and signers.</p>
+        <figure class="shot"><img src="/help/img/20-verify.jpg" alt="Verify page"><figcaption>Figure 17. Verify a signed document.</figcaption></figure>
+      </section>
+
+      <section id="admin">
+        <h2>7. Administration</h2>
+        <p>The <strong>Admin ▾</strong> menu appears for administrators only. Everything done here is recorded in the system log.</p>
+        <h3 id="admin-users">Users</h3>
+        <ul>
+          <li><strong>Add a user</strong>: name, email and access. <strong>Generate</strong> fills in a strong password; the person is emailed their sign-in details.</li>
+          <li><strong>Edit</strong>, <strong>Set new password</strong>, and audit-trail <strong>View</strong>/<strong>Download</strong> permissions per user.</li>
+          <li><strong>Deactivate</strong> instead of deleting, so names stay in every audit trail.</li>
+          <li><strong>Outside signers</strong> lists people who signed without an account; <strong>Create account</strong> fills in the add-user form.</li>
+        </ul>
+        <figure class="shot"><img src="/help/img/14-users.jpg" alt="Users page"><figcaption>Figure 18. Users.</figcaption></figure>
+        <figure class="shot"><img src="/help/img/15-outside-signers.jpg" alt="Outside signers"><figcaption>Figure 19. Outside signers and their account requests.</figcaption></figure>
+        <h3 id="admin-tickets">Support tickets</h3>
+        <p>Sign-in problems and account requests arrive with a case number. Fix the problem, then <strong>Resolve</strong> with a note; the person is emailed.</p>
+        <figure class="shot"><img src="/help/img/16-support-tickets.jpg" alt="Support tickets"><figcaption>Figure 20. Support tickets.</figcaption></figure>
+        <h3 id="admin-log">System log</h3>
+        <p>Sign-ins, failed attempts, locks, user changes, backups, restarts and outside signers' activity, with an integrity check. Filter by time and download as PDF.</p>
+        <figure class="shot"><img src="/help/img/18-system-log.jpg" alt="System log"><figcaption>Figure 21. The system log.</figcaption></figure>
+        <h3 id="admin-backup">Backup and restore</h3>
+        <ul>
+          <li><strong>Download backup to this computer</strong> or <strong>Save a backup on the server now</strong>.</li>
+          <li><strong>Automatic backups</strong>: off, every few hours, daily or weekly at a set time; production servers back up daily at 02:00 unless changed.</li>
+          <li><strong>Restore</strong> needs your password, first saves the current data as a restore point, and signs everyone out.</li>
+        </ul>
+        <figure class="shot"><img src="/help/img/17-backup.jpg" alt="Backup and restore"><figcaption>Figure 22. Backup and restore, with the schedule, backups on the server and the backup log.</figcaption></figure>
+        <h3 id="admin-server">Server restart (system administrator only)</h3>
+        <p><strong>Back up, update and restart</strong> saves a backup, gets the newest code, checks it and restarts. If the update fails, nothing restarts. Production servers can't erase their data.</p>
+        <figure class="shot"><img src="/help/img/19-server-restart.jpg" alt="Server restart"><figcaption>Figure 23. Server restart.</figcaption></figure>
+      </section>
+
+      <section id="trouble">
+        <h2>8. Troubleshooting</h2>
+        <table>
+          <tr><th>Problem</th><th>What to do</th></tr>
+          <tr><td>Code or signing email didn't arrive</td><td>Check junk/spam and send a new one. Senders can use <strong>Email from Outlook</strong>. Still missing: raise a sign-in help ticket.</td></tr>
+          <tr><td>“Account locked”</td><td>Wait 15 minutes, or ask an administrator to unlock it.</td></tr>
+          <tr><td>“Signing is locked”</td><td>Wait 30 minutes, then try again or send yourself a new temporary password.</td></tr>
+          <tr><td>“You are logged in as … but this document was sent to …”</td><td>Log out and sign in with the email the agreement was sent to.</td></tr>
+          <tr><td>“This link is no longer valid”</td><td>You've already signed. The signed PDF is emailed when everyone has signed; with an account, use <strong>Log in to view</strong>.</td></tr>
+          <tr><td>Upload refused</td><td>Use PDF, Word, Excel, PowerPoint, text or common image files. iPhone HEIC photos: share as JPG.</td></tr>
+          <tr><td>Everyone signed but no signed PDF</td><td>Signatures are kept. An administrator opens the agreement and clicks <strong>Retry completion</strong>.</td></tr>
+          <tr><td>The site doesn't open</td><td>Tell the system administrator.</td></tr>
+        </table>
+      </section>
+    </main>
+  </div>
+</body>
+</html>

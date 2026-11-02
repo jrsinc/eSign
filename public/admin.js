@@ -68,7 +68,7 @@ async function showLogin(notice = '') {
         <button class="primary" style="width:100%">Continue</button>
       </form>
       <p class="small muted" style="margin-top:14px">${status.loginCode === false ? '' : 'Two-step sign-in: after your password, we email you a one-time code.<br>'}Forgot your password or locked out? <a href="#" id="helpPassword">Ask an administrator for help</a></p>
-      <p class="small muted" style="margin:10px 0 0;text-align:center"><a href="/policy.html" target="_blank" rel="noopener">Policies and privacy</a></p>
+      <p class="small muted" style="margin:10px 0 0;text-align:center"><a href="/help.html" target="_blank" rel="noopener">User manual</a> · <a href="/policy.html" target="_blank" rel="noopener">Policies and privacy</a></p>
     </div>`;
   if (nextUrl && params.get('email')) {
     $('#email').value = params.get('email');
@@ -1806,7 +1806,7 @@ async function showOrganizer(doc) {
       <div class="card row" style="flex-wrap:wrap;margin-bottom:16px">
         <div style="flex:1;min-width:240px"><h2 style="margin:0">Organize pages</h2>
           <span class="small muted">Drag pages to reorder. Rotate or delete pages, or add more files (PDF, Word, images) to merge them in.</span></div>
-        <button id="addFiles">+ Add PDF files</button>
+        <button id="addFiles">+ Add files</button>
         <input type="file" id="moreFiles" accept="${UPLOAD_ACCEPT}" multiple hidden>
       </div>
       <div class="thumbs" id="thumbs"></div>
