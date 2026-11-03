@@ -1,6 +1,6 @@
 {
     "name": "company-esign",
-    "version": "1.0.0",
+    "version": "2.0.0",
     "description": "JRS eSign: self-hosted electronic signature server",
     "main": "server.js",
     "engines": {

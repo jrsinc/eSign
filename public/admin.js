@@ -91,6 +91,27 @@ async function showLogin(notice = '') {
       showCodeStep(r);
     } catch (err) {
       $('#loginErr').textContent = err.message;
+      // Expired password: administrators choose a new one here; others ask an administrator.
+      if (err.data?.passwordExpired && err.data.canChange) {
+        $('#loginErr').insertAdjacentHTML('beforeend', `
+          <span style="display:block;margin-top:8px;color:var(--ink)">
+            <label for="newPw">New password</label><input id="newPw" type="password" autocomplete="new-password">
+            <button type="button" class="primary" id="newPwSave" style="margin-top:8px;width:100%">Save new password and continue</button></span>`);
+        $('#newPwSave').onclick = async () => {
+          try {
+            await api('/api/password/expired', { method: 'POST', body: { email: $('#email').value, current: $('#pw').value, next: $('#newPw').value } });
+            $('#pw').value = $('#newPw').value;
+            toast('New password saved');
+            $('#loginForm').requestSubmit();
+          } catch (e2) { toast(e2.message, 5000); }
+        };
+      } else if (err.data?.passwordExpired) {
+        const a = document.createElement('a');
+        a.href = '#';
+        a.textContent = ' Ask an administrator for a new password';
+        a.onclick = (e2) => { e2.preventDefault(); raiseHelpTicket({ kind: 'password', email: $('#email').value.trim() }); };
+        $('#loginErr').append(a);
+      }
       btn.disabled = false;
     }
   };
@@ -653,7 +674,12 @@ async function showUsers(notice = '') {
               <td><select data-role ${u.id === me.user.id || u.systemAdmin ? 'disabled' : ''}><option value="sender" ${u.role === 'sender' ? 'selected' : ''}>Sender</option><option value="admin" ${u.role === 'admin' ? 'selected' : ''}>Administrator (full access)</option></select></td>
               <td>${statusBadge(u)}</td>
               <td class="small">${permBox(u, 'viewAudit', 'View')}${permBox(u, 'downloadAudit', 'Download')}</td>
-              <td class="small muted">${u.lastLoginAt ? when(u.lastLoginAt) : '—'}</td>
+              <td class="small muted">${u.lastLoginAt ? when(u.lastLoginAt) : '—'}${(() => {
+                if (!u.passwordExpiresAt) return '';
+                const days = Math.ceil((Date.parse(u.passwordExpiresAt) - Date.now()) / 864e5);
+                return days <= 0 ? '<br><span class="badge declined">password expired</span>'
+                  : `<br><span ${days <= 14 ? 'style="color:var(--warn)"' : ''}>Password expires ${new Date(u.passwordExpiresAt).toLocaleDateString()}</span>`;
+              })()}</td>
               <td class="small" style="white-space:nowrap">
                 <button class="ghost small" data-edit>Edit</button>
                 <button class="ghost small" data-act="set-password">Set new password</button>
@@ -989,6 +1015,14 @@ async function showList() {
         <div class="card row" style="margin-bottom:16px;padding:12px 16px;background:#fef2f2;border-color:#fecaca">
           <span>⚠️ <strong>Sign-in codes are turned off</strong> (testing): everyone signs in with their password only. Remove <code>LOGIN_CODE=off</code> from <code>.env</code> and restart before real use.</span>
         </div>` : ''}
+      ${(() => {
+        const at = me.user.passwordExpiresAt && Date.parse(me.user.passwordExpiresAt);
+        const days = at ? Math.ceil((at - Date.now()) / 864e5) : null;
+        return days !== null && days <= (me.passwordPolicy?.warnDays || 14) ? `
+        <div class="card row" style="margin-bottom:16px;padding:12px 16px;background:#fffbeb;border-color:#fde68a">
+          <span>🔑 <strong>Your password expires in ${days} day${days === 1 ? '' : 's'}</strong> (${new Date(at).toLocaleDateString()}). Ask your administrator for a new one before then.</span>
+        </div>` : '';
+      })()}
       ${'Notification' in window && Notification.permission === 'default' ? `
         <div class="card row" style="margin-bottom:16px;padding:10px 16px;flex-wrap:wrap" id="notifyBar">
           <span style="flex:1;min-width:220px">🔔 Get a desktop notification when someone signs or an agreement is completed.</span>

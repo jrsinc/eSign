@@ -137,6 +137,12 @@ const SESSION_HOURS = 12;
 const IDLE_MINUTES = Number(process.env.SESSION_IDLE_MINUTES || 30);
 const LOCK_AFTER = 5; // wrong passwords in a row
 const LOCK_MINUTES = 15;
+// Password expiry and history (21 CFR 11.300(b): passwords are periodically checked and revised).
+// PASSWORD_MAX_AGE_DAYS (default 90, 0 = no expiry): after that, sign-in is refused until an
+// administrator sets a new password. PASSWORD_HISTORY (default 5): the last N passwords can't be reused.
+const PASSWORD_MAX_AGE_DAYS = Math.max(0, Number(process.env.PASSWORD_MAX_AGE_DAYS ?? 90));
+const PASSWORD_HISTORY = Math.max(1, Math.floor(Number(process.env.PASSWORD_HISTORY ?? 5)));
+const PASSWORD_WARN_DAYS = 14;
 const OTP_MINUTES = 10;
 // LOGIN_CODE=off skips the emailed sign-in code (password only). Meant only for testing while email
 // delivery is being set up; production refuses to start with it off.
@@ -151,7 +157,7 @@ const saveSessions = () => {
   fs.writeFileSync(SESSIONS_FILE, JSON.stringify(Object.fromEntries(sessions)));
 };
 const challenges = new Map(); // pending two-step sign-ins: id -> { userId, codeHash, expires, attempts, sentAt }
-const publicUser = (u) => ({ id: u.id, email: u.email, name: u.name, role: u.role, status: u.status, createdAt: u.createdAt, lastLoginAt: u.lastLoginAt, lockedUntil: u.lockedUntil, permissions: u.permissions || {}, systemAdmin: isSystemAdmin(u), can: { viewAudit: can(u, 'viewAudit'), downloadAudit: can(u, 'downloadAudit') } });
+const publicUser = (u) => ({ id: u.id, email: u.email, name: u.name, role: u.role, status: u.status, createdAt: u.createdAt, lastLoginAt: u.lastLoginAt, lockedUntil: u.lockedUntil, permissions: u.permissions || {}, systemAdmin: isSystemAdmin(u), passwordExpiresAt: passwordExpiresAt(u), can: { viewAudit: can(u, 'viewAudit'), downloadAudit: can(u, 'downloadAudit') } });
 
 // The system administrator is the only person who may restart the server or erase its data; other
 // administrators, even with full access, may not. SYSTEM_ADMIN_EMAIL in .env names them; otherwise it is
@@ -165,6 +171,20 @@ const isSystemAdmin = (u) => !!u && u.role === 'admin' && u.status === 'active' 
 // Administrators can do everything; other users only what an administrator granted them.
 const can = (u, permission) => u.role === 'admin' || !!u.permissions?.[permission];
 const actorOf = (u) => `${u.name} (${u.email})`;
+
+const passwordExpiresAt = (u) => (PASSWORD_MAX_AGE_DAYS > 0 && u.passwordHash
+  ? new Date(Date.parse(u.passwordSetAt || u.createdAt) + PASSWORD_MAX_AGE_DAYS * 864e5).toISOString() : null);
+const passwordExpired = (u) => { const at = passwordExpiresAt(u); return !!at && Date.parse(at) <= Date.now(); };
+// True if the password is the current one or one of the previous PASSWORD_HISTORY - 1.
+const passwordReused = (u, password) => [u.passwordHash, ...(u.passwordHistory || [])].filter(Boolean).slice(0, PASSWORD_HISTORY)
+  .some((h) => authLib.verifyPassword(password, h));
+// Sets a new password, keeping the previous ones (hashed) for the history check.
+function setPassword(u, password) {
+  if (u.passwordHash) u.passwordHistory = [u.passwordHash, ...(u.passwordHistory || [])].slice(0, PASSWORD_HISTORY - 1);
+  u.passwordHash = authLib.hashPassword(password);
+  u.passwordSetAt = now();
+  delete u.expiryNotice;
+}
 
 function requireUser(req, res, next) {
   const s = sessions.get(req.cookies.sid);
@@ -234,7 +254,7 @@ app.post('/api/auth/setup', (req, res) => {
   if (!isEmail(email)) return res.status(400).json({ error: 'Please enter a valid email address.' });
   const problem = authLib.passwordProblem(req.body.password, { email, name });
   if (problem) return res.status(400).json({ error: problem });
-  const user = { id: id(8), email, name, role: 'admin', status: 'active', passwordHash: authLib.hashPassword(req.body.password), createdAt: now(), failed: 0 };
+  const user = { id: id(8), email, name, role: 'admin', status: 'active', passwordHash: authLib.hashPassword(req.body.password), passwordSetAt: now(), createdAt: now(), failed: 0 };
   store.addUser(user);
   req.actor = actorOf(user);
   sysLog(req, 'user', `First administrator account created: ${actorOf(user)}`);
@@ -275,6 +295,13 @@ app.post('/api/login', async (req, res) => {
   user.lockedUntil = undefined;
   store.save();
   req.actor = actorOf(user);
+  if (passwordExpired(user)) {
+    sysLog(req, 'login_failed', `Sign-in refused for ${email}: password expired ${auditStamp(passwordExpiresAt(user))}`);
+    const on = new Date(passwordExpiresAt(user)).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
+    // Administrators set their own new password here (there may be no other administrator to ask).
+    if (user.role === 'admin') return res.status(403).json({ error: `Your password expired on ${on}. Choose a new one to continue.`, passwordExpired: true, canChange: true });
+    return res.status(403).json({ error: `Your password expired on ${on}. Ask your administrator for a new one.`, passwordExpired: true });
+  }
   // Sign-in codes turned off (testing only; refused in production): the password alone signs in.
   if (!LOGIN_CODE) {
     startSession(req, res, user, 'password only - sign-in codes are turned off');
@@ -348,7 +375,7 @@ app.post('/api/logout', (req, res) => {
 });
 
 app.get('/api/me', requireUser, (req, res) =>
-  res.json({ company: COMPANY, companyFull: COMPANY_FULL, app: APP_NAME, mail: mailer.enabled(), loginCode: LOGIN_CODE, notify: process.env.NOTIFY_EMAIL || '', dateFormats: DATE_FORMATS, reasons: REASONS, user: publicUser(req.user), idleMinutes: IDLE_MINUTES }));
+  res.json({ company: COMPANY, companyFull: COMPANY_FULL, app: APP_NAME, mail: mailer.enabled(), loginCode: LOGIN_CODE, notify: process.env.NOTIFY_EMAIL || '', dateFormats: DATE_FORMATS, reasons: REASONS, user: publicUser(req.user), idleMinutes: IDLE_MINUTES, passwordPolicy: { maxAgeDays: PASSWORD_MAX_AGE_DAYS, history: PASSWORD_HISTORY, warnDays: PASSWORD_WARN_DAYS } }));
 
 // Outside signers: people who sign with a temporary password because they have no account here.
 // Listed for administrators with the agreements sent to them, so an account can be given if wanted.
@@ -476,6 +503,24 @@ app.put('/api/profile', requireUser, (req, res) => {
 // Users can't change or reset their own password; they ask an administrator.
 app.post('/api/password/forgot', (req, res) => res.status(403).json({ error: 'Please ask your administrator to set a new password for you.' }));
 
+// An administrator whose password has expired sets a new one at sign-in (current password required);
+// sign-in then continues as usual (code step).
+app.post('/api/password/expired', async (req, res) => {
+  if (tooManyAttempts(req)) return res.status(429).json({ error: 'Too many attempts. Please wait 15 minutes and try again.' });
+  const user = store.getUserByEmail(String(req.body.email || '').trim());
+  if (!user || user.status !== 'active' || user.role !== 'admin' || !authLib.verifyPassword(String(req.body.current || ''), user.passwordHash) || !passwordExpired(user)) {
+    return res.status(400).json({ error: 'Email or password is incorrect, or the password has not expired.' });
+  }
+  const problem = authLib.passwordProblem(req.body.next, user);
+  if (problem) return res.status(400).json({ error: problem });
+  if (passwordReused(user, req.body.next)) return res.status(400).json({ error: `Choose a password you haven't used for your last ${PASSWORD_HISTORY} passwords.` });
+  setPassword(user, req.body.next);
+  store.save();
+  req.actor = actorOf(user);
+  sysLog(req, 'password', `${user.name} set a new password at sign-in after it expired`);
+  res.json({ ok: true });
+});
+
 // Administrators may change their own password.
 app.post('/api/password/change', requireUser, requireAdminRole, (req, res) => {
   if (!authLib.verifyPassword(req.body.current, req.user.passwordHash)) {
@@ -484,8 +529,8 @@ app.post('/api/password/change', requireUser, requireAdminRole, (req, res) => {
   }
   const problem = authLib.passwordProblem(req.body.next, req.user);
   if (problem) return res.status(400).json({ error: problem });
-  if (authLib.verifyPassword(req.body.next, req.user.passwordHash)) return res.status(400).json({ error: 'Choose a password different from your current one.' });
-  req.user.passwordHash = authLib.hashPassword(req.body.next);
+  if (passwordReused(req.user, req.body.next)) return res.status(400).json({ error: `Choose a password you haven't used for your last ${PASSWORD_HISTORY} passwords.` });
+  setPassword(req.user, req.body.next);
   for (const [k, s] of sessions) if (s.userId === req.user.id && k !== req.cookies.sid) sessions.delete(k);
   saveSessions();
   store.save();
@@ -517,7 +562,7 @@ app.post('/api/users', requireUser, requireAdminRole, async (req, res) => {
   const pw = adminPassword(req.body, { email, name });
   if (pw.error) return res.status(400).json({ error: pw.error });
   const permissions = Object.fromEntries(PERMISSIONS.map((p) => [p, !!req.body.permissions?.[p]]));
-  const user = { id: id(8), email, name, role, status: 'active', passwordHash: authLib.hashPassword(pw.password), permissions, createdAt: now(), createdBy: req.user.id, failed: 0 };
+  const user = { id: id(8), email, name, role, status: 'active', passwordHash: authLib.hashPassword(pw.password), passwordSetAt: now(), permissions, createdAt: now(), createdBy: req.user.id, failed: 0 };
   store.addUser(user);
   // An outside signer's account request is done once their account exists.
   for (const t of store.tickets().filter((x) => x.status === 'open' && x.kind === 'account' && sameEmail(x.email, email))) {
@@ -583,8 +628,9 @@ app.post('/api/users/:id/:action', requireUser, requireAdminRole, async (req, re
     case 'set-password': {
       const pw = adminPassword(req.body, user);
       if (pw.error) return res.status(400).json({ error: pw.error });
+      if (passwordReused(user, pw.password)) return res.status(400).json({ error: `This password was used recently. Choose one not used for the last ${PASSWORD_HISTORY} passwords.` });
       password = pw.password;
-      user.passwordHash = authLib.hashPassword(password);
+      setPassword(user, password);
       user.failed = 0;
       user.lockedUntil = undefined;
       if (user.status === 'invited') user.status = 'active';
@@ -1553,6 +1599,25 @@ async function sendDueReminders() {
   }
 }
 setInterval(() => sendDueReminders().catch((e) => console.error('Reminder error:', e)), 15 * 60 * 1000);
+
+// Emails each active user 14 and 3 days before their password expires (once each).
+function passwordExpiryNotices() {
+  if (!PASSWORD_MAX_AGE_DAYS) return;
+  for (const u of store.users().filter((x) => x.status === 'active')) {
+    const at = passwordExpiresAt(u);
+    if (!at) continue;
+    const daysLeft = Math.ceil((Date.parse(at) - Date.now()) / 864e5);
+    const stage = daysLeft <= 0 ? null : daysLeft <= 3 ? '3' : daysLeft <= PASSWORD_WARN_DAYS ? '14' : null;
+    if (!stage || u.expiryNotice === stage || (u.expiryNotice === '3' && stage === '14')) continue;
+    u.expiryNotice = stage;
+    store.save();
+    sysLog(null, 'password', `Password expiry notice emailed to ${actorOf(u)} (${daysLeft} day${daysLeft === 1 ? '' : 's'} left)`);
+    mailer.send({ to: u.email, subject: `Your ${APP_NAME} password expires in ${daysLeft} day${daysLeft === 1 ? '' : 's'}`, heading: 'Your password expires soon',
+      text: `Hello ${u.name},\n\nYour ${APP_NAME} password expires on ${new Date(at).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' })}. After that you can't sign in until an administrator sets a new password for you.\n\nPlease ask your administrator for a new password before then.`,
+      link: BASE_URL, linkLabel: `OPEN ${APP_NAME.toUpperCase()}` }).catch((e) => console.error('Mail error:', e.message));
+  }
+}
+setInterval(passwordExpiryNotices, 60 * 60 * 1000);
 
 function sendPdf(res, file, name, inline) {
   res.setHeader('Content-Type', 'application/pdf');
