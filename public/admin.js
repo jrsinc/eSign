@@ -1430,9 +1430,11 @@ function showEditor(doc) {
         <label for="cfAppearance">Signature style</label>
         <select id="cfAppearance">
           <option value="standard">Handwritten, with name, time and reason below</option>
+          <option value="shield">Signed stamp with shield, reason, time and signature ID</option>
+          <option value="framed">Framed: signature with name, email, reason, time and signature ID</option>
           <option value="digital">Digital ID stamp (like Adobe)</option>
         </select>
-        <p class="small muted">Digital ID stamp: the name large on the left; "Digitally signed by", DN, reason and date on the right.</p>` : ''}
+        <p class="small muted" id="cfAppearanceHelp"></p>` : ''}
       ${f.type === 'formula' ? `
         <label for="cfFormula">Formula</label>
         <input id="cfFormula" value="${esc(f.formula)}" placeholder="{Qty} * {Price}" style="font-family:var(--font)">
@@ -1498,7 +1500,27 @@ function showEditor(doc) {
       showCheck();
     }
     if ($('#cfNote')) $('#cfNote').oninput = (e) => { f.note = e.target.value; changed(); };
-    if ($('#cfAppearance')) { $('#cfAppearance').value = f.appearance || 'standard'; $('#cfAppearance').onchange = (e) => { f.appearance = e.target.value; changed(); }; }
+    if ($('#cfAppearance')) {
+      const help = {
+        standard: 'The signature on a line, with the name, date and time, and reason below it.',
+        shield: 'A shield, "Signed by" name and company, the signature, the reason and date and time, and the signature ID (certificate serial).',
+        framed: 'A frame headed "Digitally signed via Method 365 by:", the signature, then Name, Email, Reason and Time, and the signature ID.',
+        digital: 'The name large on the left; "Digitally signed by", DN, reason and date on the right.',
+      };
+      // These styles hold several lines: the box grows to a size where they stay readable.
+      const minH = { shield: 0.075, framed: 0.14, digital: 0.06 };
+      const minW = { shield: 0.4, framed: 0.42, digital: 0.3 };
+      const show = () => { $('#cfAppearanceHelp').textContent = help[f.appearance || 'standard']; };
+      $('#cfAppearance').value = f.appearance || 'standard';
+      show();
+      $('#cfAppearance').onchange = (e) => {
+        f.appearance = e.target.value;
+        if (minH[f.appearance] && f.h < minH[f.appearance]) f.h = Math.min(minH[f.appearance], 1 - f.y);
+        if (minW[f.appearance] && f.w < minW[f.appearance]) f.w = Math.min(minW[f.appearance], 1 - f.x);
+        show();
+        changed();
+      };
+    }
     if ($('#cfGroup')) $('#cfGroup').oninput = (e) => { f.group = e.target.value; changed(); };
     if ($('#cfOptions')) $('#cfOptions').oninput = (e) => { f.options = e.target.value.split('\n').map((s) => s.trim()).filter(Boolean); changed(); };
     if ($('#cfReq')) $('#cfReq').onchange = (e) => { f.required = e.target.checked; changed(); };
@@ -1648,6 +1670,8 @@ function showEditor(doc) {
   function fieldText(f) {
     if (f.type === 'checkbox' || f.type === 'radio') return '';
     if (f.type === 'signature' && f.appearance === 'digital') return 'Digital ID stamp';
+    if (f.type === 'signature' && f.appearance === 'shield') return 'Signed stamp';
+    if (f.type === 'signature' && f.appearance === 'framed') return 'Framed signature';
     if (f.type === 'formula') return `= ${f.formula || 'formula'}`;
     if (f.type === 'note') return `🗒 ${f.note || 'Note'}`;
     if (f.type === 'attachment') return `📎 ${f.label || 'Attachment'}`;

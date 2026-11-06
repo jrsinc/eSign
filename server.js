@@ -1184,7 +1184,7 @@ function cleanField(f) {
     dateFormat: DATE_FORMATS.includes(f.dateFormat) ? f.dateFormat : 'MM/DD/YYYY',
     options: Array.isArray(f.options) ? f.options.map((o) => String(o).trim().slice(0, 100)).filter(Boolean).slice(0, 50) : [],
     group: String(f.group || '').slice(0, 60),
-    appearance: f.type === 'signature' && f.appearance === 'digital' ? 'digital' : 'standard',
+    appearance: f.type === 'signature' && ['digital', 'shield', 'framed'].includes(f.appearance) ? f.appearance : 'standard',
     style: {
       font: FONTS.includes(st.font) ? st.font : 'Helvetica',
       size: st.size === 'auto' || !st.size ? 'auto' : Math.min(36, Math.max(6, Number(st.size) || 10)),
