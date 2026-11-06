@@ -212,7 +212,7 @@ async function load() {
         break;
       }
       case 'stamp': {
-        const pick = Object.assign(document.createElement('input'), { type: 'file', accept: 'image/png,image/jpeg', hidden: true });
+        const pick = Object.assign(document.createElement('input'), { type: 'file', accept: 'image/*', hidden: true });
         el.textContent = `🔏 ${f.label || 'Add your stamp'}`;
         if (!f.required) el.classList.add('done');
         pick.onchange = async () => {
@@ -475,12 +475,14 @@ $('#cancelSig').onclick = () => $('#modal').classList.add('hidden');
 // Turns an uploaded JPG/PNG into a PNG data URL (max 1200 px wide). For signatures the white paper
 // background becomes transparent and the image is cropped to the ink.
 async function imageToPng(file, removeWhite) {
-  if (!/^image\/(png|jpeg)$/.test(file.type)) throw new Error('Please choose a PNG or JPG image');
-  if (file.size > 8 * 1024 * 1024) throw new Error('Image is larger than 8 MB');
+  // Any picture the browser can open (JPG, PNG, WebP, GIF, BMP; HEIC on iPhone and Mac) is accepted
+  // and turned into a PNG of a size the server accepts.
+  if (file.type && !file.type.startsWith('image/')) throw new Error('Please choose a picture (JPG, PNG, HEIC, WebP, GIF or BMP)');
+  if (file.size > 30 * 1024 * 1024) throw new Error('Image is larger than 30 MB');
   const img = await new Promise((resolve, reject) => {
     const i = new Image();
     i.onload = () => resolve(i);
-    i.onerror = () => reject(new Error('That image could not be opened'));
+    i.onerror = () => reject(new Error('That picture could not be opened on this device. Please choose a JPG or PNG.'));
     i.src = URL.createObjectURL(file);
   });
   const scale = Math.min(1, 1200 / img.width);
@@ -503,7 +505,18 @@ async function imageToPng(file, removeWhite) {
     if (!url) throw new Error('No signature found in that image');
     return url;
   }
-  return c.toDataURL('image/png');
+  // A photo as PNG can be large: shrink it until it is under the server's limit (about 500 KB).
+  let url = c.toDataURL('image/png');
+  let w = c.width;
+  while (url.length > 650000 && w > 120) {
+    w = Math.round(w * 0.75);
+    const s = document.createElement('canvas');
+    s.width = w;
+    s.height = Math.max(1, Math.round((c.height * w) / c.width));
+    s.getContext('2d').drawImage(c, 0, 0, s.width, s.height);
+    url = s.toDataURL('image/png');
+  }
+  return url;
 }
 
 let uploadedSig = null;

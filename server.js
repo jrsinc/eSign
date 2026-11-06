@@ -2069,7 +2069,7 @@ function stageValues(doc, signer, input, signedAt, tz) {
         v = v === true || v === 'true' ? 'true' : 'false';
         break;
       case 'stamp':
-        if (v && !isPng(v)) return { error: 'The stamp image could not be read. Please upload it again.' };
+        if (v && !isPng(v)) return { error: typeof v === 'string' && v.length >= 700000 ? 'The stamp picture is too large. Please choose a smaller picture.' : 'The stamp image could not be read. Please upload it again.' };
         if (f.required && !v) return { error: `Please add your stamp${f.label ? ` ("${f.label}")` : ''}.` };
         v = v || null;
         break;
