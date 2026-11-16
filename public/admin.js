@@ -1033,6 +1033,11 @@ async function showList() {
         <div class="small muted" style="margin-top:6px">PDF, Word, Excel, PowerPoint, text or images (JPG, PNG, GIF, WebP, TIFF, BMP). Choose several to merge them into one document; Word files and images are turned into PDF pages. You can reorder, rotate or delete pages afterwards.</div>
         <input type="file" id="file" accept="${UPLOAD_ACCEPT}" multiple hidden>
       </div>
+      <div class="card row" style="margin-top:12px;padding:12px 16px;flex-wrap:wrap;gap:10px">
+        <span style="flex:1;min-width:220px">✍️ <strong>Fill &amp; sign myself</strong><br><span class="small muted">Only you sign: upload a document, place your fields, and sign it now. Nothing is sent to anyone else.</span></span>
+        <button id="selfSignBtn" class="primary">Fill &amp; sign myself</button>
+        <input type="file" id="selfFile" accept="${UPLOAD_ACCEPT}" multiple hidden>
+      </div>
       <div class="row list-tools" style="margin-top:20px;flex-wrap:wrap;gap:12px;align-items:flex-end">
         <div><label for="fStatus">Status</label><select id="fStatus">
           <option value="">All statuses</option><option value="draft">Draft</option><option value="sent">Out for signature</option>
@@ -1061,6 +1066,8 @@ async function showList() {
   const input = $('#file');
   drop.onclick = () => input.click();
   input.onchange = () => input.files.length && uploadPdfs([...input.files]);
+  $('#selfSignBtn').onclick = () => $('#selfFile').click();
+  $('#selfFile').onchange = () => $('#selfFile').files.length && uploadPdfs([...$('#selfFile').files], true);
   drop.ondragover = (e) => { e.preventDefault(); drop.classList.add('over'); };
   drop.ondragleave = () => drop.classList.remove('over');
   drop.ondrop = (e) => {
@@ -1109,8 +1116,9 @@ function renderRows(docs, filtered) {
 const UPLOAD_EXT = /\.(pdf|jpe?g|png|gif|webp|tiff?|avif|bmp|svg|docx?|rtf|odt|txt|xlsx?|ods|pptx?|odp)$/i;
 const UPLOAD_ACCEPT = '.pdf,.doc,.docx,.rtf,.odt,.txt,.xls,.xlsx,.ods,.ppt,.pptx,.odp,.jpg,.jpeg,.png,.gif,.webp,.tif,.tiff,.avif,.bmp,.svg';
 
-async function uploadPdfs(files) {
+async function uploadPdfs(files, selfSign = false) {
   const fd = new FormData();
+  if (selfSign) fd.append('selfSign', '1');
   files.forEach((f) => fd.append('file', f));
   const converting = files.some((f) => !/\.pdf$/i.test(f.name));
   toast(converting ? 'Uploading and converting to PDF…' : files.length > 1 ? `Merging ${files.length} files…` : 'Uploading…', 20000);
@@ -1175,7 +1183,7 @@ function showEditor(doc) {
     <span id="saveState" class="small muted"></span>
     <button id="pagesBtn">📄 Organize pages</button>
     <button id="delDoc" class="ghost danger" title="Drafts have not been sent, so they can be discarded">Discard draft</button>
-    <button id="sendBtn" class="primary">Send</button>`;
+    <button id="sendBtn" class="primary">${doc.selfSign ? '✍️ Sign now' : 'Send'}</button>`;
 
   app.innerHTML = `
     <div class="editor">
@@ -1222,6 +1230,10 @@ function showEditor(doc) {
     if (f) return renderCustomize(f);
     const sb = $('#sidebar');
     sb.innerHTML =
+      (doc.selfSign ? section('recipients', 'SIGNER', `
+        <p class="small" style="margin:0 0 6px">✍️ <strong>Fill &amp; sign myself</strong></p>
+        <p class="small muted" style="margin:0">You are the only signer: <strong>${esc(doc.signers[0]?.name || '')}</strong> (${esc(doc.signers[0]?.email || '')}). Place your fields, then click <strong>Sign now</strong>. Nothing is emailed to anyone else.</p>
+        <div hidden><button id="addSigner"></button><select id="order"><option value="parallel"></option><option value="sequential"></option></select></div>`) :
       section('recipients', 'ADD RECIPIENTS', `
         <div id="signers">${doc.signers.map((s, i) => `
           <div class="signer-row sortable" data-id="${s.id}">
@@ -1245,7 +1257,7 @@ function showEditor(doc) {
           <option value="parallel">Everyone at once</option>
           <option value="sequential">One after another (in list order)</option>
         </select>
-        ${doc.signers.length > 1 ? '<p class="small muted">Drag ⋮⋮ or use ▲▼ to change who signs 1st, 2nd, 3rd…</p>' : ''}`) +
+        ${doc.signers.length > 1 ? '<p class="small muted">Drag ⋮⋮ or use ▲▼ to change who signs 1st, 2nd, 3rd…</p>' : ''}`)) +
       section('fields', 'ADD FIELDS', `
         <label for="activeSigner" style="margin-top:0">Fields for</label>
         <select id="activeSigner">${doc.signers.map((s, i) => `<option value="${s.id}">${i + 1}. ${esc(s.name || s.email || '(unnamed)')}</option>`).join('') || '<option value="">Add a recipient first</option>'}</select>
@@ -1253,15 +1265,17 @@ function showEditor(doc) {
           ${Object.entries(FIELD_TYPES).map(([t, d]) => `<button data-type="${t}" class="${placing === t ? 'active' : ''}"><span class="ico">${d.icon}</span>${d.label}</button>`).join('')}
         </div>
         <p class="small muted">Pick a field, then click on the page. Click a placed field to customize it; right-click for more options.</p>`) +
-      section('message', 'ADD MESSAGE', `
+      section('message', doc.selfSign ? 'DOCUMENT NAME' : 'ADD MESSAGE', `
         <label for="title" style="margin-top:0">Agreement name *</label>
         <input id="title" value="${esc(doc.title)}">
+        <div ${doc.selfSign ? 'hidden' : ''}>
         <label for="subject">Email subject</label>
         <input id="subject" value="${esc(doc.emailSubject || '')}" placeholder="Please sign &quot;${esc(doc.title)}&quot;">
         <label for="msg">Email message</label>
         <textarea id="msg" rows="4" placeholder="Please review and complete &quot;${esc(doc.title)}&quot;.">${esc(doc.message)}</textarea>
         <label for="reminder">Send reminder</label>
-        <select id="reminder">${Object.entries(REMINDER_LABELS).map(([k, v]) => `<option value="${k}">${v}</option>`).join('')}</select>`) +
+        <select id="reminder">${Object.entries(REMINDER_LABELS).map(([k, v]) => `<option value="${k}">${v}</option>`).join('')}</select>
+        </div>`) +
       section('settings', 'SETTINGS', `
         <p class="small muted" style="margin:4px 0 8px">Signers always give a reason (the meaning of their signature), as 21 CFR Part 11 requires.</p>
         <p class="small muted">The reason appears under each signature and in the audit report.</p>
@@ -1772,6 +1786,17 @@ function showEditor(doc) {
   };
 
   $('#sendBtn').onclick = async () => {
+    if (doc.selfSign) {
+      try {
+        await save();
+        if (!confirm(`Sign "${doc.title}" now?\n\nIt gets an agreement ID and can't be edited after this. You'll fill in your fields, sign, and confirm with your password.`)) return;
+        const r = await api(`/api/documents/${doc.id}/self-sign`, { method: 'POST' });
+        location.href = r.link;
+      } catch (e) {
+        toast(e.message, 4000);
+      }
+      return;
+    }
     try {
       await save();
       const list = doc.signers.map((s, i) => `${i + 1}. ${s.name} <${s.email}>`).join('\n');
@@ -2069,6 +2094,9 @@ function showDetail(doc) {
               <div>
                 <strong>${esc(s.name)}</strong> <span class="badge ${s.status}">${s.status}</span><br>
                 <span class="small muted">${esc(s.email)}</span>
+                ${(s.reassignedFrom || []).map((r) => `<div class="small muted">↪ Passed on by ${esc(r.name)} (${esc(r.email)}) ${when(r.at)}${r.reason ? ` · Reason: ${esc(r.reason)}` : ''}</div>`).join('')}
+                ${doc.selfSign && doc.status === 'sent' && s.status !== 'signed' && s.link && (s.email || '').toLowerCase() === me.user.email.toLowerCase() ? `
+                  <a class="btn primary" style="margin-top:6px" href="${esc(s.link)}">✍️ Sign now</a>` : ''}
                 ${s.signedAt ? `<div class="small muted">Signed ${when(s.signedAt)} · IP ${esc(s.ip)}${s.title || s.company ? `<br>${esc([s.title, s.company].filter(Boolean).join(', '))}` : ''}${s.reason ? `<br>Reason: ${esc(s.reason)}` : ''}</div>` : ''}
                 ${doc.status === 'sent' && s.status !== 'signed' && s.link ? `
                   <div class="small" style="color:var(--ok);margin-top:4px">● ${sequential ? 'Their turn to sign now' : 'Can sign now'}</div>

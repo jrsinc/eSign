@@ -82,6 +82,8 @@ async function load() {
       <div class="pages" id="pages"></div>
     </div>`;
   $('#bar').classList.remove('hidden');
+  // Signing your own document: nobody to pass it to.
+  $('#reassignBtn').classList.toggle('hidden', !!info.selfSign);
   renderIdentity();
   $('#consent').onchange = updateProgress;
 
@@ -679,12 +681,14 @@ $('#reasonOk').onclick = () => {
 function askPassword({ action, meaning, send, done }) {
   const a = info.auth;
   const signing = action === 'sign';
+  // Words for each action: [verb, button, busy button]
+  const words = { sign: ['sign', 'Sign', 'Signing…'], decline: ['decline', 'Decline', 'Declining…'], reassign: ['pass this on', 'Pass on', 'Passing on…'] }[action];
   $('#pwTitle').textContent = a.flow === 'account'
-    ? (signing ? 'Confirm signing with your password' : 'Confirm declining with your password')
-    : `Enter the temporary password sent to ${a.invitedEmail} to ${signing ? 'sign' : 'decline'}`;
+    ? { sign: 'Confirm signing with your password', decline: 'Confirm declining with your password', reassign: 'Confirm passing this on with your password' }[action]
+    : `Enter the temporary password sent to ${a.invitedEmail} to ${words[0]}`;
   $('#pwSummary').innerHTML = [
     ['Document', info.title], ['Agreement ID', info.agreementId], ['Signer', info.signer.name], ['Invited email', a.invitedEmail],
-    [signing ? 'Meaning of signature' : 'Action', signing ? (meaning || 'Signature') : `Decline to sign${meaning ? `: ${meaning}` : ''}`],
+    [signing ? 'Meaning of signature' : 'Action', signing ? (meaning || 'Signature') : action === 'reassign' ? meaning : `Decline to sign${meaning ? `: ${meaning}` : ''}`],
   ].filter(([, v]) => v).map(([k, v]) => `<tr><th>${esc(k)}</th><td>${esc(v)}</td></tr>`).join('');
   $('#pwLabel').textContent = a.flow === 'account' ? `Your account password (${a.signedInAs})` : 'Temporary password';
   $('#signPw').autocomplete = a.flow === 'account' ? 'current-password' : 'one-time-code';
@@ -694,8 +698,8 @@ function askPassword({ action, meaning, send, done }) {
     ? 'Your password confirms it is you signing, at this moment.'
     : `${a.tempValid ? 'Check your inbox (and spam) for the email with the temporary password.' : 'Your temporary password has expired or was not sent yet.'} <a href="#" id="pwResend">Send a new one</a>`;
   $('#pwResend')?.addEventListener('click', (e) => { e.preventDefault(); sendTempPassword(); });
-  $('#pwOk').textContent = signing ? 'Sign' : 'Decline';
-  $('#pwOk').classList.toggle('danger', !signing);
+  $('#pwOk').textContent = words[1];
+  $('#pwOk').classList.toggle('danger', action === 'decline');
   $('#pwOk').disabled = false;
   $('#pwModal').classList.remove('hidden');
   $('#signPw').focus();
@@ -705,14 +709,14 @@ function askPassword({ action, meaning, send, done }) {
     const password = $('#signPw').value;
     if (!password) return $('#signPw').focus();
     $('#pwOk').disabled = true;
-    $('#pwOk').textContent = signing ? 'Signing…' : 'Declining…';
+    $('#pwOk').textContent = words[2];
     try {
       const r = await send(password);
       $('#pwModal').classList.add('hidden');
       done(r);
     } catch (e) {
       $('#pwOk').disabled = false;
-      $('#pwOk').textContent = signing ? 'Sign' : 'Decline';
+      $('#pwOk').textContent = words[1];
       $('#pwErr').textContent = e.message;
       $('#signPw').value = '';
       $('#signPw').focus();
@@ -788,6 +792,31 @@ $('#declineBtn').onclick = async () => {
     action: 'decline', meaning: reason.trim(),
     send: (password) => api(`/api/sign/${encodeURIComponent(token)}/decline`, { method: 'POST', body: { reason, password } }),
     done: () => message('You declined to sign', '<p class="muted">The sender has been notified.</p>'),
+  });
+};
+
+// Pass signing to someone else: name, email and reason, then the same password check as signing.
+$('#reassignBtn').onclick = () => {
+  ['#raName', '#raEmail', '#raReason'].forEach((s) => ($(s).value = ''));
+  $('#raErr').textContent = '';
+  $('#reassignModal').classList.remove('hidden');
+  $('#raName').focus();
+};
+$('#raCancel').onclick = () => $('#reassignModal').classList.add('hidden');
+$('#raOk').onclick = () => {
+  const name = $('#raName').value.trim();
+  const email = $('#raEmail').value.trim();
+  const reason = $('#raReason').value.trim();
+  if (!name) return ($('#raErr').textContent = 'Please enter their full name.');
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return ($('#raErr').textContent = 'Please enter a valid email address.');
+  if (email.toLowerCase() === String(info.signer.email).toLowerCase()) return ($('#raErr').textContent = 'That is your own email. Enter the person who should sign instead of you.');
+  if (!reason) return ($('#raErr').textContent = 'Please give a reason.');
+  $('#reassignModal').classList.add('hidden');
+  askPassword({
+    action: 'reassign', meaning: `Pass signing to ${name} (${email}). Reason: ${reason}`,
+    send: (password) => api(`/api/sign/${encodeURIComponent(token)}/reassign`, { method: 'POST', body: { name, email, reason, password } }),
+    done: (r) => message('Passed on ✓', `<p>${esc(r.to.name)} (${esc(r.to.email)}) will sign in your place.</p>
+      <p class="muted">${r.emailed ? 'They have been emailed their own signing link.' : 'The sender can share their signing link with them.'} The sender has been told. This link no longer works for you.</p>`),
   });
 };
 

@@ -25,6 +25,7 @@
     <div class="grow">
       <label><input type="checkbox" id="consent"> I have read the <a href="/policy.html#disclosure" target="_blank" rel="noopener">Electronic Record and Signature Disclosure</a> and agree to use electronic records and signatures, and that my electronic signature is the legal equivalent of my handwritten signature.</label>
     </div>
+    <button id="reassignBtn" class="ghost" title="Someone else should sign instead of you">↪ Pass to someone else</button>
     <button id="declineBtn" class="ghost danger">Decline</button>
     <button id="nextBtn">Next field</button>
     <button id="finishBtn" class="primary">Finish</button>
@@ -79,6 +80,25 @@
       <div class="row end" style="margin-top:16px">
         <button id="reasonCancel">Cancel</button>
         <button id="reasonOk" class="primary">Sign document</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Pass signing to someone else (e.g. Sachin hands it to Pratik) -->
+  <div id="reassignModal" class="modal-bg hidden">
+    <div class="modal" style="max-width:480px">
+      <h2>Pass signing to someone else</h2>
+      <p class="small muted" style="margin-top:0">The person you choose signs in your place, in the same fields. They get their own signing link, yours stops working, and the sender is told.</p>
+      <label for="raName">Their full name *</label>
+      <input id="raName" maxlength="120" placeholder="e.g. Pratik Shah" autocomplete="off">
+      <label for="raEmail">Their email *</label>
+      <input id="raEmail" type="email" maxlength="200" placeholder="pratik@company.com" autocomplete="off">
+      <label for="raReason">Reason *</label>
+      <input id="raReason" maxlength="300" placeholder="e.g. Pratik is the approver for this project">
+      <p id="raErr" class="small" style="color:var(--danger);margin:6px 0 0"></p>
+      <div class="row end" style="margin-top:14px">
+        <button id="raCancel">Cancel</button>
+        <button id="raOk" class="primary">Continue</button>
       </div>
     </div>
   </div>

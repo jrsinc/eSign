@@ -1153,8 +1153,14 @@ app.post('/api/documents', requireUser, upload.array('file', 20), async (req, re
     fields: [],
     events: [],
   };
+  // "Fill & sign myself": the uploader is the only signer and signs it straight away (no emails).
+  if (req.body.selfSign === '1' || req.body.selfSign === 'true') {
+    doc.selfSign = true;
+    doc.signingOrder = 'parallel';
+    doc.signers = [{ id: id(6), name: req.user.name, email: String(req.user.email).trim().toLowerCase(), order: 1, color: COLORS[0], status: 'pending' }];
+  }
   fs.writeFileSync(filePath(doc.originalFile), bytes);
-  log(doc, `Document created by ${req.user.name} (${req.user.email})`, req, 'created');
+  log(doc, `Document created by ${req.user.name} (${req.user.email})${doc.selfSign ? ' to fill and sign themselves' : ''}`, req, 'created');
   for (const p of parts.filter((x) => x.from !== 'pdf')) log(doc, `Converted to PDF: ${p.name} (${CONVERTED_FROM[p.from]})`, req, 'pages', `SHA-256 of the uploaded file: ${p.hash}`);
   if (req.files.length > 1) log(doc, `${req.files.length} files merged: ${req.files.map((f) => f.originalname).join(', ')}`, req, 'pages');
   store.insert(doc);
@@ -1208,7 +1214,8 @@ app.put('/api/documents/:id', requireUser, (req, res) => {
   if (typeof emailSubject === 'string') doc.emailSubject = emailSubject.slice(0, 200);
   if (signingOrder === 'parallel' || signingOrder === 'sequential') doc.signingOrder = signingOrder;
   if (reminder in REMINDERS) doc.reminder = reminder;
-  if (Array.isArray(signers)) {
+  // A "fill & sign myself" document always has exactly one signer: its owner.
+  if (Array.isArray(signers) && !doc.selfSign) {
     doc.signers = signers.slice(0, 20).map((s, i) => ({
       id: typeof s.id === 'string' && s.id ? s.id : id(6),
       name: String(s.name || '').trim().slice(0, 120),
@@ -1541,6 +1548,71 @@ app.post('/api/documents/:id/send', requireUser, async (req, res) => {
   res.json(adminView(doc, req));
 });
 
+// "Fill & sign myself": the owner finishes the draft and signs it at once. Nothing is emailed; the
+// signing page opens in the owner's own browser, and they confirm with their own password as usual.
+app.post('/api/documents/:id/self-sign', requireUser, async (req, res) => {
+  const doc = store.get(req.params.id);
+  if (!doc) return res.status(404).json({ error: 'Not found' });
+  if (!doc.selfSign) return res.status(400).json({ error: 'This document is not set up to sign yourself.' });
+  if (doc.status !== 'draft') return res.status(400).json({ error: 'Already started' });
+  const me = doc.signers[0];
+  if (doc.signers.length !== 1 || !sameEmail(me.email, req.user.email)) return res.status(403).json({ error: 'Only the person who uploaded this document can sign it here.' });
+  if (!doc.fields.some((f) => f.signerId === me.id && f.type === 'signature')) return res.status(400).json({ error: 'Add a signature field first: pick Signature, then click on the page.' });
+  for (const f of doc.fields) {
+    if (f.type === 'dropdown' && !f.options.length) return res.status(400).json({ error: `Dropdown "${f.label || 'field'}" has no options yet.` });
+  }
+  doc.agreementId = store.nextAgreementId(AGREEMENT_PREFIX);
+  doc.status = 'sent';
+  doc.sentAt = now();
+  log(doc, `Agreement ${doc.agreementId} created for ${who(me)} to fill and sign themselves`, req, 'created');
+  issueLinks(doc);
+  store.save();
+  res.json({ ok: true, link: `/sign.html?t=${me.token}` });
+});
+
+// The person whose turn it is hands their signature over to someone else (e.g. Sachin passes it to
+// Pratik). It needs the same identity and password as signing. The new person takes over the same
+// place and fields, gets a fresh signing link, and the old link stops working.
+app.post('/api/sign/:token/reassign', async (req, res) => {
+  const ctx = signerCtx(req, res);
+  if (!ctx) return;
+  const { doc, signer } = ctx;
+  if (doc.status !== 'sent') return res.status(400).json({ error: `This document is ${doc.status}.` });
+  if (doc.selfSign) return res.status(400).json({ error: 'A document you fill and sign yourself can\'t be passed to someone else.' });
+  if (signer.status === 'signed' || signer.status === 'declined') return res.status(400).json({ error: `You have already ${signer.status}.` });
+  const idn = identityBlocked(req, res, doc, signer);
+  if (!idn) return;
+  if (!activeSigners(doc).includes(signer)) return res.status(400).json({ error: 'It is not your turn yet.' });
+  const name = String(req.body.name || '').trim().slice(0, 120);
+  const email = String(req.body.email || '').trim().toLowerCase().slice(0, 200);
+  const reason = String(req.body.reason || '').trim().slice(0, 300);
+  if (!name) return res.status(400).json({ error: 'Please enter the new signer\'s full name.' });
+  if (!isEmail(email)) return res.status(400).json({ error: 'Please enter a valid email address for the new signer.' });
+  if (!reason) return res.status(400).json({ error: 'Please give a reason for passing this on.' });
+  if (sameEmail(email, signer.email)) return res.status(400).json({ error: 'That is your own email. Enter the person who should sign instead of you.' });
+  if (doc.signers.some((s) => s !== signer && sameEmail(s.email, email))) return res.status(400).json({ error: `${email} is already a recipient of this agreement.` });
+  const account = store.getUserByEmail(email);
+  if (account && account.status !== 'active') return res.status(400).json({ error: `The account for ${email} is deactivated, so it can't sign.` });
+  const pw = await checkSigningPassword(req, doc, signer, idn);
+  if (!pw.ok) return res.status(pw.status).json(pw);
+
+  const before = who(signer);
+  const at = now();
+  signer.reassignedFrom = [...(signer.reassignedFrom || []), { name: signer.name, email: signer.email, at, reason, ip: clientIp(req) }];
+  signerSysLog(req, doc, signer, `Signing passed to ${name} (${email})`, `Reason: ${reason}`);
+  for (const k of ['token', 'tempPw', 'tempPwUsedAt', 'viewedAt', 'signFailed', 'signLockedUntil', 'pendingAttachments', 'lastEmailAt', 'accountRequestedAt']) delete signer[k];
+  Object.assign(signer, { name, email, status: 'pending' });
+  log(doc, `Signing reassigned by ${before} to ${who(signer)}. Reason: ${reason}`, req, 'info',
+    `${auditStamp(at)} - IP address: ${clientIp(req)} - Device: ${deviceOf(req.headers['user-agent'])} - Authentication: ${idn.flow === 'account' ? 'account password re-entered' : 'temporary password entered'}`);
+  const fresh = issueLinks(doc);
+  store.save();
+  for (const s of fresh) await invite(doc, s);
+  store.save();
+  await notifySender(`${before.split(' (')[0]} passed "${doc.title}" to ${name} [${doc.agreementId}]`,
+    `${before} passed signing of agreement ${doc.agreementId} "${doc.title}" to ${who(signer)}.\nReason: ${reason}`, undefined, doc);
+  res.json({ ok: true, to: { name, email }, emailed: mailer.enabled() });
+});
+
 app.post('/api/documents/:id/remind/:signerId', requireUser, async (req, res) => {
   const doc = store.get(req.params.id);
   const signer = doc && doc.signers.find((s) => s.id === req.params.signerId);
@@ -1841,6 +1913,7 @@ app.get('/api/sign/:token', async (req, res) => {
     status: doc.status,
     requireReason: true,
     reasons: REASONS,
+    selfSign: !!doc.selfSign,
     signer: { name: signer.name, email: signer.email, status: signer.status, color: signer.color },
     auth: {
       flow: idn.flow,
