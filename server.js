@@ -1121,7 +1121,7 @@ app.get('/api/documents', requireUser, (req, res) => {
   res.json(
     store.all().map((d) => ({ d, access: docAccess(req.user, d) })).filter((x) => x.access).map(({ d, access }) => ({
       id: d.id, agreementId: d.agreementId, title: d.title, status: d.status, createdAt: d.createdAt, completedAt: d.completedAt,
-      senderName: d.senderName, access,
+      senderName: d.senderName, access, selfSign: !!d.selfSign,
       signers: d.signers.map((s) => ({ name: s.name, email: s.email, status: s.status })),
     }))
   );

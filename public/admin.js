@@ -279,6 +279,7 @@ function route() {
   else if (location.hash === '#/backup' && me.user.role === 'admin') showBackup();
   else if (location.hash === '#/tickets' && me.user.role === 'admin') showTickets();
   else if (location.hash === '#/profile') showProfile();
+  else if (location.hash === '#/sign-myself') showSignMyself();
   else showList();
 }
 
@@ -1096,12 +1097,77 @@ async function showList() {
   render();
 }
 
+// ---------------- Sign myself ----------------
+// Documents only the signed-in person signs: upload, place fields, sign. Nothing is sent to anyone.
+async function showSignMyself() {
+  app.innerHTML = `
+    <div class="wrap">
+      <h1 style="margin:0 0 4px">✍️ Sign myself</h1>
+      <p class="muted" style="margin:0 0 16px">Fill in and sign a document yourself. You are the only signer and nothing is emailed to anyone. When you finish, you get the signed PDF with its agreement ID and audit trail.</p>
+      <div class="drop" id="selfDrop">
+        <strong>Drop files here</strong> or click to upload a document to sign yourself
+        <div class="small muted" style="margin-top:6px">PDF, Word, Excel, PowerPoint, text or images. Several files are merged into one document.</div>
+        <input type="file" id="selfFile" accept="${UPLOAD_ACCEPT}" multiple hidden>
+      </div>
+      <div class="small muted" style="margin:14px 0 0"><strong>How it works:</strong> 1. Upload · 2. Place your signature, date and text fields · 3. Select <em>Sign now</em> · 4. Sign with your password · 5. Download the signed PDF.</div>
+      <div class="row list-tools" style="margin-top:20px;flex-wrap:wrap;gap:12px;align-items:flex-end">
+        <div><label for="ssStatus">Show</label><select id="ssStatus">
+          <option value="">All</option><option value="draft">Not started (draft)</option><option value="sent">Waiting for my signature</option><option value="completed">Signed</option>
+        </select></div>
+        <span class="small muted" id="ssCount" style="padding-bottom:9px"></span>
+      </div>
+      <div class="card" style="margin-top:10px;padding:0">
+        <table>
+          <thead><tr><th>Agreement ID</th><th>Document</th><th>Status</th><th>Created</th><th></th></tr></thead>
+          <tbody id="ssRows"><tr><td colspan="5" class="muted">Loading…</td></tr></tbody>
+        </table>
+      </div>
+    </div>`;
+  const drop = $('#selfDrop');
+  const input = $('#selfFile');
+  drop.onclick = () => input.click();
+  input.onchange = () => input.files.length && uploadPdfs([...input.files], true);
+  drop.ondragover = (e) => { e.preventDefault(); drop.classList.add('over'); };
+  drop.ondragleave = () => drop.classList.remove('over');
+  drop.ondrop = (e) => {
+    e.preventDefault();
+    drop.classList.remove('over');
+    const files = [...e.dataTransfer.files].filter((f) => UPLOAD_EXT.test(f.name));
+    if (files.length) uploadPdfs(files, true);
+  };
+
+  const mine = (await api('/api/documents')).filter((d) => d.selfSign && d.signers.some((s) => (s.email || '').toLowerCase() === me.user.email.toLowerCase()));
+  const label = { draft: 'Not started', sent: 'Waiting for my signature', completed: 'Signed', voided: 'Cancelled', declined: 'Declined' };
+  const action = (d) => d.status === 'draft' ? '<span class="btn">Continue</span>'
+    : d.status === 'sent' ? '<span class="btn primary">✍️ Sign now</span>'
+    : d.status === 'completed' ? `<a class="btn" href="/api/documents/${d.id}/signed" download>⬇ Signed PDF</a>` : '';
+  const render = () => {
+    const status = $('#ssStatus').value;
+    const docs = mine.filter((d) => !status || d.status === status).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+    $('#ssCount').textContent = `${docs.length} of ${mine.length} document${mine.length === 1 ? '' : 's'}`;
+    $('#ssRows').innerHTML = docs.length
+      ? docs.map((d) => `
+        <tr class="click" data-id="${d.id}">
+          <td class="small" style="white-space:nowrap">${d.agreementId ? esc(d.agreementId) : '<span class="muted">Draft</span>'}</td>
+          <td><strong>${esc(d.title)}</strong></td>
+          <td><span class="badge ${d.status}">${label[d.status] || statusLabel(d.status)}</span></td>
+          <td class="small muted">${when(d.createdAt)}</td>
+          <td style="text-align:right">${action(d)}</td>
+        </tr>`).join('')
+      : `<tr><td colspan="5" class="muted">${mine.length ? 'Nothing here with this status.' : 'You haven\'t signed anything yourself yet. Upload a document above to start.'}</td></tr>`;
+    app.querySelectorAll('#ssRows a').forEach((a) => (a.onclick = (e) => e.stopPropagation()));
+    app.querySelectorAll('#ssRows tr.click').forEach((tr) => (tr.onclick = () => (location.hash = `#/doc/${tr.dataset.id}`)));
+  };
+  $('#ssStatus').onchange = render;
+  render();
+}
+
 function renderRows(docs, filtered) {
   $('#rows').innerHTML = docs.length
     ? docs.map((d) => `
       <tr class="click" data-id="${d.id}">
         <td class="small" style="font-family:var(--font);white-space:nowrap">${d.agreementId ? esc(d.agreementId) : '<span class="muted">Draft</span>'}</td>
-        <td><strong>${esc(d.title)}</strong>${d.senderName ? `<div class="small muted">${d.access === 'recipient' ? 'Sent to you by' : 'Sent by'} ${esc(d.senderName)}</div>` : ''}</td>
+        <td><strong>${esc(d.title)}</strong>${d.selfSign ? ' <span class="small muted">✍️ Sign myself</span>' : ''}${d.senderName ? `<div class="small muted">${d.access === 'recipient' ? 'Sent to you by' : 'Sent by'} ${esc(d.senderName)}</div>` : ''}</td>
         <td><span class="badge ${d.status}">${statusLabel(d.status)}</span></td>
         <td class="small">${d.signers.map((s, i) => `${i + 1}. ${esc(s.name)} <span class="badge ${s.status}">${s.status}</span>`).join('<br>') || '<span class="muted">—</span>'}</td>
         <td class="small muted">${when(d.createdAt)}</td>
@@ -1154,8 +1220,22 @@ function newField(type, signerId, page, x, y, w, h, extra = {}) {
     formula: '', decimals: 2,
     note: type === 'note' ? 'Please fill in all highlighted fields.' : '',
     style: { font: 'Helvetica', size: 'auto', color: '#000000', align: 'left' },
+    // New signatures use the "Signed by" shield stamp; other styles can be chosen per field.
+    appearance: type === 'signature' ? 'shield' : 'standard',
     ...extra,
   };
+}
+
+// Stamp styles hold several lines: the box grows (within the page) to a size where they stay readable.
+const STAMP_MIN = { shield: [0.4, 0.075], framed: [0.42, 0.14], digital: [0.3, 0.06] };
+function fitAppearance(f) {
+  const m = f.type === 'signature' && STAMP_MIN[f.appearance];
+  if (!m) return f;
+  if (f.w < m[0]) f.w = Math.min(m[0], 1 - f.x);
+  if (f.h < m[1]) f.h = Math.min(m[1], 1 - f.y);
+  if (f.w < m[0]) { f.x = Math.max(0, 1 - m[0]); f.w = Math.min(m[0], 1); }
+  if (f.h < m[1]) { f.y = Math.max(0, 1 - m[1]); f.h = Math.min(m[1], 1); }
+  return f;
 }
 
 // The last copied field, kept for this browser tab so it can be pasted into another agreement too.
@@ -1443,8 +1523,8 @@ function showEditor(doc) {
       ${f.type === 'signature' ? `
         <label for="cfAppearance">Signature style</label>
         <select id="cfAppearance">
+          <option value="shield">Signed stamp with shield, reason, time and signature ID (default)</option>
           <option value="standard">Handwritten, with name, time and reason below</option>
-          <option value="shield">Signed stamp with shield, reason, time and signature ID</option>
           <option value="framed">Framed: signature with name, email, reason, time and signature ID</option>
           <option value="digital">Digital ID stamp (like Adobe)</option>
         </select>
@@ -1497,6 +1577,7 @@ function showEditor(doc) {
     $('#cfType').onchange = (e) => {
       const t = e.target.value;
       Object.assign(f, newField(t, f.signerId, f.page, f.x, f.y, f.w, f.h, { id: f.id, style: f.style, label: f.label }));
+      fitAppearance(f);
       changed();
       renderCustomize(f);
     };
@@ -1521,16 +1602,12 @@ function showEditor(doc) {
         framed: 'A frame headed "Digitally signed via Method 365 by:", the signature, then Name, Email, Reason and Time, and the signature ID.',
         digital: 'The name large on the left; "Digitally signed by", DN, reason and date on the right.',
       };
-      // These styles hold several lines: the box grows to a size where they stay readable.
-      const minH = { shield: 0.075, framed: 0.14, digital: 0.06 };
-      const minW = { shield: 0.4, framed: 0.42, digital: 0.3 };
       const show = () => { $('#cfAppearanceHelp').textContent = help[f.appearance || 'standard']; };
       $('#cfAppearance').value = f.appearance || 'standard';
       show();
       $('#cfAppearance').onchange = (e) => {
         f.appearance = e.target.value;
-        if (minH[f.appearance] && f.h < minH[f.appearance]) f.h = Math.min(minH[f.appearance], 1 - f.y);
-        if (minW[f.appearance] && f.w < minW[f.appearance]) f.w = Math.min(minW[f.appearance], 1 - f.x);
+        fitAppearance(f);
         show();
         changed();
       };
@@ -1860,7 +1937,7 @@ function showEditor(doc) {
           const n = doc.fields.filter((f) => f.type === 'radio' && f.signerId === activeSigner).length;
           extra.label = `Option ${n + 1}`;
         }
-        const f = newField(placing, activeSigner, pi, x, y, w, h, extra);
+        const f = fitAppearance(newField(placing, activeSigner, pi, x, y, w, h, extra));
         doc.fields.push(f);
         selected = f.id;
         renderFields();

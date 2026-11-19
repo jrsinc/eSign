@@ -49,6 +49,7 @@ async function pdfForm(title, extra = {}) {
   const self = (await admin('/api/documents', await pdfForm('My own form', { selfSign: '1' }))).data;
   ok(self.selfSign === true && self.signers.length === 1 && self.signers[0].email === 'admin@test.local', 'self-sign: the uploader is the only signer');
   const me = self.signers[0];
+  ok((await admin('/api/documents')).data.find((d) => d.id === self.id)?.selfSign === true, 'self-sign: marked in the document list (for the Sign myself page)');
   // Trying to add other recipients is ignored.
   await admin(`/api/documents/${self.id}`, { signers: [me, { id: 'x', name: 'Other', email: 'other@test.local' }], fields: [] }, false, 'PUT');
   ok((await admin(`/api/documents/${self.id}`)).data.signers.length === 1, 'self-sign: other recipients can\'t be added');
